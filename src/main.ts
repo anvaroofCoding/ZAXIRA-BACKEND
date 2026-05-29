@@ -1,0 +1,56 @@
+import { ValidationPipe } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { NestFactory, Reflector } from '@nestjs/core';
+import compression from 'compression';
+import { json, urlencoded } from 'express';
+import helmet from 'helmet';
+import { AppModule } from './app.module';
+import { HttpExceptionFilter } from './common/filters/http-exception.filter';
+import { TransformInterceptor } from './common/interceptors/transform.interceptor';
+
+async function bootstrap() {
+  const app = await NestFactory.create(AppModule, {
+    logger: ['error', 'warn', 'log'],
+  });
+
+  const configService = app.get(ConfigService);
+  const port = configService.get<number>('port', 8000);
+  const apiPrefix = configService.get<string>('apiPrefix', 'api');
+  const corsOrigin = configService.get<string>('corsOrigin', 'http://localhost:5173');
+  const corsOrigins = corsOrigin
+    .split(',')
+    .map((v) => v.trim())
+    .filter(Boolean);
+
+  app.use(helmet());
+  app.use(compression());
+  app.use(json({ limit: '10mb' }));
+  app.use(urlencoded({ extended: true, limit: '10mb' }));
+  app.setGlobalPrefix(apiPrefix);
+  app.enableShutdownHooks();
+  app.enableCors({
+    origin: corsOrigins.length > 1 ? corsOrigins : corsOrigins[0],
+    credentials: true,
+  });
+
+  app.useGlobalPipes(
+    new ValidationPipe({
+      whitelist: true,
+      forbidNonWhitelisted: true,
+      transform: true,
+      transformOptions: { enableImplicitConversion: true },
+    }),
+  );
+
+  app.useGlobalFilters(new HttpExceptionFilter());
+  app.useGlobalInterceptors(new TransformInterceptor(app.get(Reflector)));
+
+  await app.listen(port);
+
+  // eslint-disable-next-line no-console
+  console.log(`ZAXIRA API: http://localhost:${port}/${apiPrefix}`);
+  // eslint-disable-next-line no-console
+  console.log(`ZAXIRA Realtime: ws://localhost:${port}/realtime`);
+}
+
+void bootstrap();
