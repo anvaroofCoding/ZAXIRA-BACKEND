@@ -11,6 +11,8 @@ import { UsersService } from '../users/users.service';
 import { Sequence, SequenceDocument } from '../purchase-requests/schemas/sequence.schema';
 import { CreateWarehouseLocationDto } from './dto/create-warehouse-location.dto';
 import { CreateWarehouseExpenseDto } from './dto/create-warehouse-expense.dto';
+import { appendDateRangeClause } from '../../common/utils/date-range-filter.util';
+import { QueryWarehouseExpensesDto } from './dto/query-warehouse-expenses.dto';
 import { QueryWarehouseInventoryDto } from './dto/query-warehouse-inventory.dto';
 import {
   isWarehouseExpenseReasonKey,
@@ -629,6 +631,235 @@ export class WarehouseService {
       reasonKey: reason.key,
       reasonLabel: reason.label,
       createdAt: firstCreated?.createdAt ?? now,
+    };
+  }
+
+  private expenseGroupToPublic(row: {
+    code: string;
+    reasonKey: string;
+    reasonLabel: string;
+    comment?: string;
+    createdAt: Date;
+    itemsCount: number;
+    totalQuantity: number;
+    createdByUser?: {
+      userId: Types.ObjectId;
+      displayName: string;
+      login: string;
+    } | null;
+  }) {
+    return {
+      code: row.code,
+      reasonKey: row.reasonKey,
+      reasonLabel: row.reasonLabel,
+      comment: row.comment?.trim() || '',
+      createdAt: row.createdAt,
+      itemsCount: row.itemsCount,
+      totalQuantity: row.totalQuantity,
+      createdBy: row.createdByUser
+        ? {
+            userId: String(row.createdByUser.userId),
+            displayName: row.createdByUser.displayName,
+            login: row.createdByUser.login,
+          }
+        : null,
+    };
+  }
+
+  async listExpensesPaginated(
+    query: QueryWarehouseExpensesDto,
+    userId: string,
+    role?: UserRole,
+  ) {
+    const structureId = await this.resolveViewerStructureIdOrFail(userId, role);
+    const page = query.page ?? 1;
+    const limit = query.limit ?? 10;
+    const skip = (page - 1) * limit;
+
+    const matchClauses: Record<string, unknown>[] = [
+      { structureId: new Types.ObjectId(structureId) },
+    ];
+
+    appendDateRangeClause(matchClauses, 'createdAt', query.dateFrom, query.dateTo);
+
+    const term = query.search?.trim();
+    if (term) {
+      const regex = new RegExp(term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+      matchClauses.push({
+        $or: [
+          { code: regex },
+          { reasonLabel: regex },
+          { comment: regex },
+          { 'items.name': regex },
+          { 'items.barcode': regex },
+        ],
+      });
+    }
+
+    if (query.reasonKey?.trim()) {
+      matchClauses.push({ reasonKey: query.reasonKey.trim() });
+    }
+
+    const match =
+      matchClauses.length === 1 ? matchClauses[0] : { $and: matchClauses };
+
+    const [facetResult] = await this.expenseModel
+      .aggregate([
+        { $match: match },
+        {
+          $group: {
+            _id: '$code',
+            code: { $first: '$code' },
+            reasonKey: { $first: '$reasonKey' },
+            reasonLabel: { $first: '$reasonLabel' },
+            comment: { $first: '$comment' },
+            createdAt: { $max: '$createdAt' },
+            createdBy: { $first: '$createdBy' },
+            items: { $push: '$items' },
+          },
+        },
+        {
+          $addFields: {
+            items: {
+              $reduce: {
+                input: '$items',
+                initialValue: [],
+                in: { $concatArrays: ['$$value', '$$this'] },
+              },
+            },
+          },
+        },
+        {
+          $addFields: {
+            itemsCount: { $size: '$items' },
+            totalQuantity: { $sum: '$items.quantity' },
+          },
+        },
+        {
+          $lookup: {
+            from: 'users',
+            localField: 'createdBy',
+            foreignField: '_id',
+            as: 'creator',
+          },
+        },
+        {
+          $addFields: {
+            createdByUser: {
+              $let: {
+                vars: { creator: { $arrayElemAt: ['$creator', 0] } },
+                in: {
+                  userId: '$$creator._id',
+                  displayName: {
+                    $ifNull: ['$$creator.displayName', '$$creator.login'],
+                  },
+                  login: '$$creator.login',
+                },
+              },
+            },
+          },
+        },
+        { $project: { creator: 0, items: 0 } },
+        { $sort: { createdAt: -1 } },
+        {
+          $facet: {
+            items: [{ $skip: skip }, { $limit: limit }],
+            total: [{ $count: 'count' }],
+          },
+        },
+      ])
+      .exec();
+
+    const rows = (facetResult?.items ?? []) as Array<{
+      code: string;
+      reasonKey: string;
+      reasonLabel: string;
+      comment?: string;
+      createdAt: Date;
+      itemsCount: number;
+      totalQuantity: number;
+      createdByUser?: {
+        userId: Types.ObjectId;
+        displayName: string;
+        login: string;
+      } | null;
+    }>;
+    const total = facetResult?.total?.[0]?.count ?? 0;
+
+    return {
+      items: rows.map((row) => this.expenseGroupToPublic(row)),
+      total,
+      page,
+      limit,
+      totalPages: Math.max(1, Math.ceil(total / limit)),
+    };
+  }
+
+  async findExpenseByCode(code: string, userId: string, role?: UserRole) {
+    const structureId = await this.resolveViewerStructureIdOrFail(userId, role);
+    const normalizedCode = code?.trim();
+
+    if (!normalizedCode) {
+      throw new BadRequestException('Chiqim kodi noto‘g‘ri');
+    }
+
+    const docs = await this.expenseModel
+      .find({
+        structureId: new Types.ObjectId(structureId),
+        code: normalizedCode,
+      })
+      .sort({ locationId: 1, createdAt: 1 })
+      .exec();
+
+    if (!docs.length) {
+      throw new NotFoundException('Chiqim topilmadi');
+    }
+
+    const locationIds = docs.map((doc) => doc.locationId);
+    const locations = await this.locationModel
+      .find({ _id: { $in: locationIds } })
+      .select('name')
+      .exec();
+    const locationNameById = new Map(
+      locations.map((loc) => [String(loc._id), loc.name]),
+    );
+
+    const creator = await this.usersService.findById(String(docs[0].createdBy));
+
+    const items = docs.flatMap((doc) =>
+      doc.items.map((item) => ({
+        name: item.name,
+        characteristics: item.characteristics,
+        barcode: item.barcode,
+        quantity: item.quantity,
+        locationId: String(doc.locationId),
+        locationName: locationNameById.get(String(doc.locationId)) ?? '—',
+      })),
+    );
+
+    const totalQuantity = items.reduce((sum, item) => sum + item.quantity, 0);
+    const createdAt = docs.reduce<Date>(
+      (latest, doc) =>
+        doc.createdAt && doc.createdAt > latest ? doc.createdAt : latest,
+      docs[0].createdAt ?? new Date(),
+    );
+
+    return {
+      code: docs[0].code,
+      reasonKey: docs[0].reasonKey,
+      reasonLabel: docs[0].reasonLabel,
+      comment: docs[0].comment?.trim() || '',
+      createdAt,
+      createdBy: creator
+        ? {
+            userId: String(creator.id),
+            displayName: creator.displayName || creator.login,
+            login: creator.login,
+          }
+        : null,
+      itemsCount: items.length,
+      totalQuantity,
+      items,
     };
   }
 }

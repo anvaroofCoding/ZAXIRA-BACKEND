@@ -18,6 +18,7 @@ import { StructuresService } from '../structures/structures.service';
 import { UsersService } from '../users/users.service';
 import { buildWarehouseItemKey } from '../warehouse/utils/item-key.util';
 import { computeWarehouseBarcode } from '../warehouse/utils/warehouse-barcode.util';
+import { WarehousePricingService } from '../warehouse/warehouse-pricing.service';
 import { WarehouseInventory, WarehouseInventoryDocument } from '../warehouse/schemas/warehouse-inventory.schema';
 import { WarehouseLocation, WarehouseLocationDocument } from '../warehouse/schemas/warehouse-location.schema';
 import { CreateWarehouseDispatchDto } from './dto/create-warehouse-dispatch.dto';
@@ -50,6 +51,7 @@ export class WarehouseDispatchesService {
     private readonly structuresService: StructuresService,
     private readonly usersService: UsersService,
     private readonly purchaseRequestsEvents: PurchaseRequestsEventsService,
+    private readonly warehousePricingService: WarehousePricingService,
   ) {}
 
   private async nextDispatchCode(shortName: string) {
@@ -74,13 +76,139 @@ export class WarehouseDispatchesService {
     };
   }
 
+  private normalizeStructureId(value: unknown): string | null {
+    if (value == null || value === '') {
+      return null;
+    }
+
+    if (value instanceof Types.ObjectId) {
+      return value.toHexString();
+    }
+
+    if (typeof value === 'object' && value !== null) {
+      if ('_id' in value) {
+        return this.normalizeStructureId((value as { _id: unknown })._id);
+      }
+
+      if (
+        typeof (value as { toHexString?: () => string }).toHexString === 'function'
+      ) {
+        return (value as Types.ObjectId).toHexString();
+      }
+    }
+
+    const raw = String(value).trim();
+    if (!raw) {
+      return null;
+    }
+
+    return Types.ObjectId.isValid(raw)
+      ? new Types.ObjectId(raw).toHexString()
+      : raw;
+  }
+
   private async getUserStructureId(userId: string): Promise<string | null> {
     const user = await this.usersService.findById(userId);
     if (!user?.structureId) {
       return null;
     }
 
-    return String(user.structureId);
+    return this.normalizeStructureId(user.structureId);
+  }
+
+  private buildTransferHistoryStructureOr(structureId: string) {
+    const structObj = new Types.ObjectId(structureId);
+
+    return {
+      $or: [
+        { 'targetStructure.structureId': structObj },
+        { sourceStructureId: structObj },
+        { 'sourceStructure.structureId': structObj },
+      ],
+    };
+  }
+
+  private isTransferDispatch(dispatch: WarehouseDispatchDocument) {
+    return (
+      !dispatch.purchaseRequestId ||
+      /^TR-/i.test(dispatch.requestCode ?? '') ||
+      Boolean(dispatch.sourceStructureId || dispatch.sourceStructure)
+    );
+  }
+
+  private resolveDispatchSourceStructureId(dispatch: WarehouseDispatchDocument) {
+    if (dispatch.sourceStructureId) {
+      return this.normalizeStructureId(dispatch.sourceStructureId);
+    }
+
+    if (dispatch.sourceStructure?.structureId) {
+      return this.normalizeStructureId(dispatch.sourceStructure.structureId);
+    }
+
+    return null;
+  }
+
+  private async isDispatchVisibleToUser(
+    dispatch: WarehouseDispatchDocument,
+    userId: string,
+    role?: UserRole,
+  ): Promise<boolean> {
+    if (isSuperAdminRole(role)) {
+      return true;
+    }
+
+    const structureId = await this.getUserStructureId(userId);
+    if (!structureId) {
+      return false;
+    }
+
+    const userStruct = this.normalizeStructureId(structureId);
+    const targetStruct = this.normalizeStructureId(
+      dispatch.targetStructure?.structureId,
+    );
+    const sourceStruct = this.resolveDispatchSourceStructureId(dispatch);
+
+    if (userStruct && targetStruct && userStruct === targetStruct) {
+      return true;
+    }
+
+    if (userStruct && sourceStruct && userStruct === sourceStruct) {
+      return true;
+    }
+
+    if (!this.isTransferDispatch(dispatch)) {
+      return false;
+    }
+
+    const dispatcherId = this.normalizeStructureId(dispatch.dispatchedBy?.userId);
+    const userIdNorm = this.normalizeStructureId(userId);
+
+    if (dispatcherId && userIdNorm && dispatcherId === userIdNorm) {
+      return true;
+    }
+
+    const count = await this.dispatchModel
+      .countDocuments({
+        _id: dispatch._id,
+        ...this.buildTransferHistoryStructureOr(structureId),
+      })
+      .exec();
+
+    return count > 0;
+  }
+
+  private async assertCanViewDispatch(
+    dispatch: WarehouseDispatchDocument,
+    userId: string,
+    role?: UserRole,
+  ) {
+    const visible = await this.isDispatchVisibleToUser(dispatch, userId, role);
+
+    if (!visible) {
+      throw new ForbiddenException(
+        'Ushbu jo‘natmani faqat qatnashgan tuzilma xodimi ko‘ra oladi',
+      );
+    }
   }
 
   private async assertReceiverAsync(
@@ -259,6 +387,7 @@ export class WarehouseDispatchesService {
         quantityReceived: 0,
         quantityRejected: 0,
         rejectReason: '',
+        unitPrice: Math.max(0, Math.round(Number(item.purchaseAmount) || 0)),
       })),
       plannedArrivalAt,
       dispatchedBy: dispatcher,
@@ -322,12 +451,15 @@ export class WarehouseDispatchesService {
           barcode: item.barcode,
         })),
       })
-      .select('name characteristics barcode quantity locationId')
+      .select('name characteristics barcode quantity locationId itemKey unitPrice')
       .exec();
 
     if (inventories.length !== mergedItems.length) {
       throw new BadRequestException('Ba’zi tovarlar omborda topilmadi');
     }
+
+    const senderPriceMap =
+      await this.warehousePricingService.getUnitPriceMapForStructure(senderStructureId);
 
     const byLocationAndBarcode = new Map(
       inventories.map((inv) => [`${String(inv.locationId)}|${inv.barcode}`, inv]),
@@ -395,6 +527,11 @@ export class WarehouseDispatchesService {
       },
       items: mergedItems.map((item, itemIndex) => {
         const inv = byLocationAndBarcode.get(`${item.locationId}|${item.barcode}`)!;
+        const unitPrice = this.warehousePricingService.resolveUnitPriceFromMap(
+          senderPriceMap,
+          inv.itemKey,
+          inv.unitPrice,
+        );
         return {
           itemIndex,
           name: inv.name,
@@ -405,6 +542,7 @@ export class WarehouseDispatchesService {
           rejectReason: '',
           sourceLocationId: new Types.ObjectId(item.locationId),
           sourceBarcode: item.barcode,
+          unitPrice,
         };
       }),
       plannedArrivalAt,
@@ -430,14 +568,21 @@ export class WarehouseDispatchesService {
     id: string,
     userId: string,
     role?: UserRole,
-    options?: { markSeen?: boolean },
+    options?: { markSeen?: boolean; source?: string; scope?: string },
   ) {
     const dispatch = await this.findByIdOrFail(id);
-    await this.assertReceiverAsync(dispatch, userId, role);
+    await this.assertCanViewDispatch(dispatch, userId, role);
 
     if (options?.markSeen && !dispatch.isSeenByReceiver) {
-      dispatch.isSeenByReceiver = true;
-      await dispatch.save();
+      const userStructureId = await this.getUserStructureId(userId);
+      const targetStructureId = this.normalizeStructureId(
+        dispatch.targetStructure.structureId,
+      );
+
+      if (userStructureId && userStructureId === targetStructureId) {
+        dispatch.isSeenByReceiver = true;
+        await dispatch.save();
+      }
     }
 
     return this.toPublic(dispatch, userId, role);
@@ -478,12 +623,7 @@ export class WarehouseDispatchesService {
       }
 
       if (query.source === 'transfer' && query.scope === 'history') {
-        clauses.push({
-          $or: [
-            { 'targetStructure.structureId': new Types.ObjectId(structureId) },
-            { sourceStructureId: new Types.ObjectId(structureId) },
-          ],
-        });
+        clauses.push(this.buildTransferHistoryStructureOr(structureId));
       } else {
         clauses.push({
           'targetStructure.structureId': new Types.ObjectId(structureId),
@@ -503,6 +643,8 @@ export class WarehouseDispatchesService {
           { requestCode: regex },
           { 'targetStructure.shortName': regex },
           { 'targetStructure.fullName': regex },
+          { 'sourceStructure.shortName': regex },
+          { 'sourceStructure.fullName': regex },
         ],
       });
     }
@@ -623,6 +765,10 @@ export class WarehouseDispatchesService {
       item.quantityReceived += received.quantityReceived;
     }
 
+    const sourceStructureIdForPricing = dispatch.sourceStructureId
+      ? String(dispatch.sourceStructureId)
+      : null;
+
     if (locationObjectId) {
       const now = new Date();
       const receivedByIndex = new Map<number, number>();
@@ -637,7 +783,7 @@ export class WarehouseDispatchesService {
       // share the same name+characteristics (same document target in bulkWrite).
       const mergedByKey = new Map<
         string,
-        { item: (typeof dispatch.items)[0]; qty: number }
+        { item: (typeof dispatch.items)[0]; qty: number; unitPrice: number }
       >();
 
       for (const item of dispatch.items) {
@@ -645,38 +791,62 @@ export class WarehouseDispatchesService {
 
         const qty = receivedByIndex.get(item.itemIndex) ?? 0;
         const itemKey = buildWarehouseItemKey(item.name, item.characteristics);
+        let unitPrice = Math.max(0, Math.round(Number(item.unitPrice) || 0));
+
+        if (unitPrice <= 0) {
+          unitPrice = await this.warehousePricingService.resolveTransferItemUnitPrice(
+            item,
+            sourceStructureIdForPricing,
+          );
+        }
+
+        if (unitPrice > 0 && (Number(item.unitPrice) || 0) <= 0) {
+          item.unitPrice = unitPrice;
+        }
+
         const existing = mergedByKey.get(itemKey);
 
         if (existing) {
           existing.qty += qty;
+          if (unitPrice > 0) {
+            existing.unitPrice = unitPrice;
+          }
         } else {
-          mergedByKey.set(itemKey, { item, qty });
+          mergedByKey.set(itemKey, { item, qty, unitPrice });
         }
       }
 
       const bulkOps = Array.from(mergedByKey.entries()).map(
-        ([itemKey, { item, qty }]) => ({
-          updateOne: {
-            filter: {
-              structureId: new Types.ObjectId(receiverStructureId),
-              locationId: locationObjectId,
-              itemKey,
-            },
-            update: {
-              $setOnInsert: {
+        ([itemKey, { item, qty, unitPrice }]) => {
+          const setFields: Record<string, unknown> = { lastReceiptAt: now };
+          if (unitPrice > 0) {
+            setFields.unitPrice = unitPrice;
+          }
+
+          return {
+            updateOne: {
+              filter: {
                 structureId: new Types.ObjectId(receiverStructureId),
                 locationId: locationObjectId,
                 itemKey,
-                name: item.name,
-                characteristics: item.characteristics,
-                barcode: computeWarehouseBarcode(item.name, item.characteristics),
               },
-              $inc: { quantity: qty },
-              $set: { lastReceiptAt: now },
+              update: {
+                $setOnInsert: {
+                  structureId: new Types.ObjectId(receiverStructureId),
+                  locationId: locationObjectId,
+                  itemKey,
+                  name: item.name,
+                  characteristics: item.characteristics,
+                  barcode: computeWarehouseBarcode(item.name, item.characteristics),
+                  unitPrice: unitPrice > 0 ? unitPrice : 0,
+                },
+                $inc: { quantity: qty },
+                $set: setFields,
+              },
+              upsert: true,
             },
-            upsert: true,
-          },
-        }),
+          };
+        },
       );
 
       if (bulkOps.length) {
@@ -776,6 +946,8 @@ export class WarehouseDispatchesService {
     dispatch.markModified('items');
     this.recomputeDispatchStatus(dispatch);
     await dispatch.save();
+
+    await this.warehousePricingService.syncInventoryUnitPrices(receiverStructureId);
 
     const dispatchStatus = dispatch.status as WarehouseDispatchStatus;
 

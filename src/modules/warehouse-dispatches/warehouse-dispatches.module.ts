@@ -5,6 +5,7 @@ import { PurchaseRequestsModule } from '../purchase-requests/purchase-requests.m
 import { Sequence, SequenceSchema } from '../purchase-requests/schemas/sequence.schema';
 import { StructuresModule } from '../structures/structures.module';
 import { UsersModule } from '../users/users.module';
+import { WarehouseModule } from '../warehouse/warehouse.module';
 import { RealtimeModule } from '../realtime/realtime.module';
 import { WarehouseDispatchDocumentService } from './warehouse-dispatch-document.service';
 import { WarehouseDispatchesController } from './warehouse-dispatches.controller';
@@ -29,6 +30,7 @@ import {
     UsersModule,
     RealtimeModule,
     ConfigModule,
+    WarehouseModule,
   ],
   controllers: [WarehouseDispatchesController],
   providers: [WarehouseDispatchesService, WarehouseDispatchDocumentService],

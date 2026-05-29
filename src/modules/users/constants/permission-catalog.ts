@@ -69,6 +69,7 @@ export const PERMISSION_CATALOG = {
         { path: '/omborlar/mening-omborim', label: 'Mening omborim' },
         { path: '/omborlar/boshqa-omborlar', label: 'Boshqa omborlar' },
         { path: '/omborlar/chiqim-qilish', label: 'Chiqim qilish' },
+        { path: '/omborlar/chiqim-tarixi', label: 'Chiqim tarixi' },
       ],
     },
     {
@@ -94,6 +95,10 @@ export const PERMISSION_CATALOG = {
         {
           path: '/invertarizatsiya/barcha-invertarizatsiyalar',
           label: 'Barcha invertarizatsiyalar',
+        },
+        {
+          path: '/invertarizatsiya/boshqaruv',
+          label: 'Boshqaruv',
         },
       ],
     },

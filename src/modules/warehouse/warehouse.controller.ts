@@ -5,6 +5,7 @@ import { ParseMongoIdPipe } from '../../common/pipes/parse-mongo-id.pipe';
 import type { JwtPayload } from '../auth/interfaces/jwt-payload.interface';
 import { CreateWarehouseLocationDto } from './dto/create-warehouse-location.dto';
 import { CreateWarehouseExpenseDto } from './dto/create-warehouse-expense.dto';
+import { QueryWarehouseExpensesDto } from './dto/query-warehouse-expenses.dto';
 import { QueryWarehouseInventoryDto } from './dto/query-warehouse-inventory.dto';
 import { WarehouseService } from './warehouse.service';
 
@@ -69,6 +70,26 @@ export class WarehouseController {
   @Get('expense-reasons')
   listExpenseReasons() {
     return this.warehouseService.listExpenseReasons();
+  }
+
+  @Get('expenses')
+  listExpenses(
+    @Query() query: QueryWarehouseExpensesDto,
+    @CurrentUser() user: JwtPayload,
+  ) {
+    return this.warehouseService.listExpensesPaginated(query, user.sub, user.role);
+  }
+
+  @Get('expenses/:code')
+  findExpenseByCode(
+    @Param('code') code: string,
+    @CurrentUser() user: JwtPayload,
+  ) {
+    return this.warehouseService.findExpenseByCode(
+      decodeURIComponent(code),
+      user.sub,
+      user.role,
+    );
   }
 
   @Post('expenses')

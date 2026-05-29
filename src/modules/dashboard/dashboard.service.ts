@@ -11,6 +11,7 @@ import {
   WarehouseExpense,
   WarehouseExpenseDocument,
 } from '../warehouse/schemas/warehouse-expense.schema';
+import { WarehousePricingService } from '../warehouse/warehouse-pricing.service';
 
 type Scope = { structureId?: string | undefined };
 
@@ -24,6 +25,7 @@ export class DashboardService {
     @InjectModel(WarehouseExpense.name)
     private readonly expenseModel: Model<WarehouseExpenseDocument>,
     private readonly usersService: UsersService,
+    private readonly warehousePricingService: WarehousePricingService,
   ) {}
 
   private async resolveViewerStructureIdOrFail(userId: string) {
@@ -93,73 +95,6 @@ export class DashboardService {
     return `${y}-${m}-${d}`;
   }
 
-  private async getLatestUnitPriceByItemKey(structureId: string) {
-    const structureObjectId = new Types.ObjectId(structureId);
-
-    const pipeline: PipelineStage[] = [
-      {
-        $match: {
-          status: { $in: [WarehouseDispatchStatus.PARTIALLY_RECEIVED, WarehouseDispatchStatus.COMPLETED] },
-          'targetStructure.structureId': structureObjectId,
-        },
-      },
-      { $sort: { dispatchedAt: -1 } },
-      { $unwind: '$items' },
-      { $match: { 'items.quantityReceived': { $gt: 0 } } },
-      {
-        $addFields: {
-          _itemKey: {
-            $concat: [
-              { $toLower: { $trim: { input: '$items.name' } } },
-              '|',
-              { $toLower: { $trim: { input: '$items.characteristics' } } },
-            ],
-          },
-        },
-      },
-      {
-        $lookup: {
-          from: 'purchase_requests',
-          localField: 'purchaseRequestId',
-          foreignField: '_id',
-          as: 'pr',
-        },
-      },
-      { $unwind: '$pr' },
-      {
-        $project: {
-          _id: 0,
-          itemKey: '$_itemKey',
-          dispatchedAt: 1,
-          unitPrice: {
-            $ifNull: [
-              { $arrayElemAt: ['$pr.items.purchaseAmount', '$items.itemIndex'] },
-              null,
-            ],
-          },
-        },
-      },
-      { $match: { unitPrice: { $ne: null } } },
-      {
-        $group: {
-          _id: '$itemKey',
-          unitPrice: { $first: '$unitPrice' },
-          dispatchedAt: { $first: '$dispatchedAt' },
-        },
-      },
-      { $project: { _id: 0, itemKey: '$_id', unitPrice: 1, dispatchedAt: 1 } },
-    ];
-
-    const rows = await this.dispatchModel.aggregate(pipeline).exec();
-    const map = new Map<string, number>();
-    for (const row of rows as Array<{ itemKey: string; unitPrice: number }>) {
-      if (row?.itemKey && Number.isFinite(row.unitPrice)) {
-        map.set(row.itemKey, Math.round(row.unitPrice));
-      }
-    }
-    return map;
-  }
-
   private async getSummaryForStructure(structureId: string) {
     const structureObjectId = new Types.ObjectId(structureId);
 
@@ -186,15 +121,20 @@ export class DashboardService {
     const itemTypesCount = inventoryAgg?.itemTypesCount ?? 0;
     const totalQuantity = inventoryAgg?.totalQuantity ?? 0;
 
-    // totalSum is approximate: current inventory qty * latest known unit price from receipts
-    const prices = await this.getLatestUnitPriceByItemKey(structureId);
+    await this.warehousePricingService.syncInventoryUnitPrices(structureId);
+
+    const prices =
+      await this.warehousePricingService.getUnitPriceMapForStructure(structureId);
     const inventoryItems = await this.inventoryModel
       .find({ structureId: structureObjectId })
-      .select('itemKey quantity')
+      .select('itemKey quantity unitPrice')
       .exec();
 
     const totalSum = inventoryItems.reduce((sum, item) => {
-      const price = prices.get(item.itemKey) ?? 0;
+      const price =
+        Number(item.unitPrice) > 0
+          ? Math.round(Number(item.unitPrice))
+          : (prices.get(item.itemKey) ?? 0);
       const qty = Number(item.quantity) || 0;
       return sum + price * qty;
     }, 0);

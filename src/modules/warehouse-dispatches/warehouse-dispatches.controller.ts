@@ -68,10 +68,14 @@ export class WarehouseDispatchesController {
   findOne(
     @Param('id', ParseMongoIdPipe) id: string,
     @Query('markSeen') markSeen: string | undefined,
+    @Query('source') source: string | undefined,
+    @Query('scope') scope: string | undefined,
     @CurrentUser() user: JwtPayload,
   ) {
     return this.warehouseDispatchesService.findByIdPublic(id, user.sub, user.role, {
       markSeen: markSeen === '1' || markSeen === 'true',
+      source: source?.trim() || undefined,
+      scope: scope?.trim() || undefined,
     });
   }
 

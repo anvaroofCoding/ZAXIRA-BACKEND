@@ -25,4 +25,7 @@ export default () => ({
       process.env.ORGANIZATION_FULL_NAME ??
       '“ZAXIRA” axborot tizimi tashkiloti',
   },
+  serpApi: {
+    apiKey: process.env.SERPAPI_API_KEY ?? '',
+  },
 });

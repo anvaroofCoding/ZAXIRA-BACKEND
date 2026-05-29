@@ -29,6 +29,10 @@ export class DispatchItemEmbeddable {
 
   @Prop({ trim: true, required: false })
   sourceBarcode?: string;
+
+  /** Jo‘natish vaqtidagi birlik narxi (so‘m) */
+  @Prop({ min: 0, default: 0 })
+  unitPrice!: number;
 }
 
 export const DispatchItemSchema =

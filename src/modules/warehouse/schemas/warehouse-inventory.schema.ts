@@ -34,6 +34,10 @@ export class WarehouseInventory {
   @Prop({ required: true, min: 0, default: 0 })
   quantity!: number;
 
+  /** Ombordagi birlik narxi (so‘m) — xarid yoki transfer qabulida saqlanadi */
+  @Prop({ min: 0, default: 0 })
+  unitPrice!: number;
+
   @Prop()
   lastReceiptAt?: Date;
 
