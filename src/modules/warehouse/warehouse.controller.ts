@@ -1,4 +1,13 @@
-import { Body, Controller, Get, Param, Post, Query, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  Param,
+  Post,
+  Query,
+  UseGuards,
+} from '@nestjs/common';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { ParseMongoIdPipe } from '../../common/pipes/parse-mongo-id.pipe';
@@ -83,12 +92,14 @@ export class WarehouseController {
   @Get('expenses/:code')
   findExpenseByCode(
     @Param('code') code: string,
+    @Query('structureId') structureId: string | undefined,
     @CurrentUser() user: JwtPayload,
   ) {
     return this.warehouseService.findExpenseByCode(
       decodeURIComponent(code),
       user.sub,
       user.role,
+      structureId,
     );
   }
 
@@ -98,6 +109,20 @@ export class WarehouseController {
     @CurrentUser() user: JwtPayload,
   ) {
     return this.warehouseService.createExpense(dto, user.sub, user.role);
+  }
+
+  @Delete('expenses/:code')
+  deleteExpenseByCode(
+    @Param('code') code: string,
+    @Query('structureId') structureId: string | undefined,
+    @CurrentUser() user: JwtPayload,
+  ) {
+    return this.warehouseService.deleteExpenseByCode(
+      decodeURIComponent(code),
+      user.sub,
+      user.role,
+      structureId,
+    );
   }
 }
 

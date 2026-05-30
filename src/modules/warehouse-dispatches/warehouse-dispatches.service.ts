@@ -14,6 +14,7 @@ import { PurchaseRequestsService } from '../purchase-requests/purchase-requests.
 import { Sequence, SequenceDocument } from '../purchase-requests/schemas/sequence.schema';
 import { UserSnapshotEmbeddable } from '../purchase-requests/schemas/user-snapshot.schema';
 import { PurchaseRequestsEventsService } from '../realtime/purchase-requests-events.service';
+import { NotificationsEventsService } from '../notifications/notifications-events.service';
 import { StructuresService } from '../structures/structures.service';
 import { UsersService } from '../users/users.service';
 import { buildWarehouseItemKey } from '../warehouse/utils/item-key.util';
@@ -51,6 +52,7 @@ export class WarehouseDispatchesService {
     private readonly structuresService: StructuresService,
     private readonly usersService: UsersService,
     private readonly purchaseRequestsEvents: PurchaseRequestsEventsService,
+    private readonly notificationsEvents: NotificationsEventsService,
     private readonly warehousePricingService: WarehousePricingService,
   ) {}
 
@@ -399,6 +401,10 @@ export class WarehouseDispatchesService {
     await request.save();
 
     this.purchaseRequestsEvents.notifyChanged(request, 'updated');
+    void this.notificationsEvents.handleWarehouseReceiptCreated(
+      dispatch,
+      request.requestCode,
+    );
 
     return this.toPublic(dispatch, userId, role);
   }
@@ -550,6 +556,8 @@ export class WarehouseDispatchesService {
       dispatchedAt: now,
       isSeenByReceiver: false,
     });
+
+    void this.notificationsEvents.handleTransferCreated(dispatch);
 
     return this.toPublic(dispatch, userId, role);
   }
@@ -818,9 +826,23 @@ export class WarehouseDispatchesService {
 
       const bulkOps = Array.from(mergedByKey.entries()).map(
         ([itemKey, { item, qty, unitPrice }]) => {
+          const barcode =
+            item.sourceBarcode?.trim() ||
+            computeWarehouseBarcode(item.name, item.characteristics);
+          const setOnInsert: Record<string, unknown> = {
+            structureId: new Types.ObjectId(receiverStructureId),
+            locationId: locationObjectId,
+            itemKey,
+            name: item.name,
+            characteristics: item.characteristics,
+            barcode,
+          };
           const setFields: Record<string, unknown> = { lastReceiptAt: now };
+
           if (unitPrice > 0) {
             setFields.unitPrice = unitPrice;
+          } else {
+            setOnInsert.unitPrice = 0;
           }
 
           return {
@@ -831,15 +853,7 @@ export class WarehouseDispatchesService {
                 itemKey,
               },
               update: {
-                $setOnInsert: {
-                  structureId: new Types.ObjectId(receiverStructureId),
-                  locationId: locationObjectId,
-                  itemKey,
-                  name: item.name,
-                  characteristics: item.characteristics,
-                  barcode: computeWarehouseBarcode(item.name, item.characteristics),
-                  unitPrice: unitPrice > 0 ? unitPrice : 0,
-                },
+                $setOnInsert: setOnInsert,
                 $inc: { quantity: qty },
                 $set: setFields,
               },
@@ -958,6 +972,7 @@ export class WarehouseDispatchesService {
       request.status = PurchaseRequestStatus.WAREHOUSE_COMPLETED;
       await request.save();
       this.purchaseRequestsEvents.notifyChanged(request, 'updated');
+      void this.notificationsEvents.handlePurchaseRequestChanged(request, 'updated');
     }
 
     return this.toPublic(dispatch, userId, role);

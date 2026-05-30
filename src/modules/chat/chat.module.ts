@@ -6,6 +6,10 @@ import { User, UserSchema } from '../users/schemas/user.schema';
 import { ChatController } from './chat.controller';
 import { ChatService } from './chat.service';
 import { ChatMessage, ChatMessageSchema } from './schemas/chat-message.schema';
+import {
+  ChatReadState,
+  ChatReadStateSchema,
+} from './schemas/chat-read-state.schema';
 
 @Module({
   imports: [
@@ -13,6 +17,7 @@ import { ChatMessage, ChatMessageSchema } from './schemas/chat-message.schema';
     RealtimeModule,
     MongooseModule.forFeature([
       { name: ChatMessage.name, schema: ChatMessageSchema },
+      { name: ChatReadState.name, schema: ChatReadStateSchema },
       { name: User.name, schema: UserSchema },
     ]),
   ],

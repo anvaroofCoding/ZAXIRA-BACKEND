@@ -2,6 +2,7 @@ import { Module, forwardRef } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { MongooseModule } from '@nestjs/mongoose';
 import { RealtimeModule } from '../realtime/realtime.module';
+import { NotificationsModule } from '../notifications/notifications.module';
 import { WarehouseDispatchesModule } from '../warehouse-dispatches/warehouse-dispatches.module';
 import { UsersModule } from '../users/users.module';
 import { PurchaseRequestDocumentService } from './purchase-request-document.service';
@@ -22,6 +23,7 @@ import { Sequence, SequenceSchema } from './schemas/sequence.schema';
     ]),
     UsersModule,
     RealtimeModule,
+    NotificationsModule,
     forwardRef(() => WarehouseDispatchesModule),
     ConfigModule,
   ],

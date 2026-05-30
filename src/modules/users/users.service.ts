@@ -23,6 +23,7 @@ import { UserPermissionsMap } from './types/page-permission.type';
 import {
   createEmptyPermissions,
   createFullPermissions,
+  hasPageAccess,
   normalizePermissions,
 } from './utils/permissions.util';
 
@@ -370,6 +371,42 @@ export class UsersService {
       .exec();
 
     return this.toPublicUser(populated ?? user);
+  }
+
+  async findActiveUserIdsWithPageAccess(
+    pagePath: string,
+    structureId?: string | null,
+  ): Promise<string[]> {
+    const filter: Record<string, unknown> = { isActive: true };
+
+    if (structureId) {
+      filter.$or = [
+        { structureId: new Types.ObjectId(structureId) },
+        { role: UserRole.SUPER_ADMIN },
+      ];
+    }
+
+    const users = await this.userModel
+      .find(filter)
+      .select('role permissions structureId')
+      .exec();
+
+    const ids = new Set<string>();
+
+    for (const user of users) {
+      if (
+        isSuperAdminRole(user.role) ||
+        hasPageAccess(
+          normalizePermissions(user.permissions as UserPermissionsMap),
+          pagePath,
+          false,
+        )
+      ) {
+        ids.add(String(user._id));
+      }
+    }
+
+    return [...ids];
   }
 
   async updateFromDto(id: string, dto: UpdateUserPayload) {

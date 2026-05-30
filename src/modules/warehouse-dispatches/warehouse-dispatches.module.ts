@@ -7,6 +7,7 @@ import { StructuresModule } from '../structures/structures.module';
 import { UsersModule } from '../users/users.module';
 import { WarehouseModule } from '../warehouse/warehouse.module';
 import { RealtimeModule } from '../realtime/realtime.module';
+import { NotificationsModule } from '../notifications/notifications.module';
 import { WarehouseDispatchDocumentService } from './warehouse-dispatch-document.service';
 import { WarehouseDispatchesController } from './warehouse-dispatches.controller';
 import { WarehouseDispatchesService } from './warehouse-dispatches.service';
@@ -29,6 +30,7 @@ import {
     StructuresModule,
     UsersModule,
     RealtimeModule,
+    NotificationsModule,
     ConfigModule,
     WarehouseModule,
   ],

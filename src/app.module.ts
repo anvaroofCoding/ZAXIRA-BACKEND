@@ -18,6 +18,7 @@ import { DashboardModule } from './modules/dashboard/dashboard.module';
 import { ChatModule } from './modules/chat/chat.module';
 import { StocktakesModule } from './modules/stocktakes/stocktakes.module';
 import { ProductPricesModule } from './modules/product-prices/product-prices.module';
+import { NotificationsModule } from './modules/notifications/notifications.module';
 
 @Module({
   imports: [
@@ -58,6 +59,7 @@ import { ProductPricesModule } from './modules/product-prices/product-prices.mod
     StocktakesModule,
     ProductPricesModule,
     MediaModule,
+    NotificationsModule,
   ],
   providers: [
     {

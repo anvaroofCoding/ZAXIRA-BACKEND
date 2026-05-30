@@ -7,7 +7,14 @@ import {
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
 import { UserRole } from '../../common/enums/user-role.enum';
+import { isSuperAdminRole } from '../../common/utils/super-admin.util';
 import { UsersService } from '../users/users.service';
+import { UserPermissionsMap } from '../users/types/page-permission.type';
+import {
+  hasPageAccess,
+  hasPageAction,
+  normalizePermissions,
+} from '../users/utils/permissions.util';
 import { Sequence, SequenceDocument } from '../purchase-requests/schemas/sequence.schema';
 import { CreateWarehouseLocationDto } from './dto/create-warehouse-location.dto';
 import { CreateWarehouseExpenseDto } from './dto/create-warehouse-expense.dto';
@@ -31,8 +38,11 @@ import {
   WarehouseExpense,
   WarehouseExpenseDocument,
 } from './schemas/warehouse-expense.schema';
+import { Structure, StructureDocument } from '../structures/schemas/structure.schema';
 
 const EXPENSE_SEQUENCE_PREFIX = 'expense:';
+const OTHER_WAREHOUSES_PATH = '/omborlar/boshqa-omborlar';
+const WAREHOUSE_EXPENSE_PAGE_PATH = '/omborlar/chiqim-qilish';
 
 @Injectable()
 export class WarehouseService {
@@ -45,6 +55,8 @@ export class WarehouseService {
     private readonly expenseModel: Model<WarehouseExpenseDocument>,
     @InjectModel(Sequence.name)
     private readonly sequenceModel: Model<SequenceDocument>,
+    @InjectModel(Structure.name)
+    private readonly structureModel: Model<StructureDocument>,
     private readonly usersService: UsersService,
   ) {}
 
@@ -61,6 +73,30 @@ export class WarehouseService {
     return `CH-${String(sequence.value).padStart(6, '0')}`;
   }
 
+  private isPrivilegedRole(role?: UserRole) {
+    return role === UserRole.SUPER_ADMIN || role === UserRole.ADMIN;
+  }
+
+  private async canBrowseExpensesAcrossStructures(userId: string, role?: UserRole) {
+    if (this.isPrivilegedRole(role) || isSuperAdminRole(role)) {
+      return true;
+    }
+
+    const user = await this.usersService.findById(userId);
+    if (!user) {
+      return false;
+    }
+
+    const permissions = normalizePermissions(
+      user.permissions as UserPermissionsMap | undefined,
+    );
+    return hasPageAccess(
+      permissions,
+      OTHER_WAREHOUSES_PATH,
+      isSuperAdminRole(role),
+    );
+  }
+
   private async resolveViewerStructureIdOrFail(userId: string, role?: UserRole) {
     const user = await this.usersService.findById(userId);
     const structureId = user?.structureId ? String(user.structureId) : null;
@@ -70,6 +106,65 @@ export class WarehouseService {
     }
 
     return structureId;
+  }
+
+  private async assertStructureAccess(structureId: string, userId: string, role?: UserRole) {
+    if (!Types.ObjectId.isValid(structureId)) {
+      throw new BadRequestException('Tuzilma identifikatori noto‘g‘ri');
+    }
+
+    if (await this.canBrowseExpensesAcrossStructures(userId, role)) {
+      return;
+    }
+
+    const userStructureId = await this.resolveViewerStructureIdOrFail(userId, role);
+    if (userStructureId !== structureId) {
+      throw new ForbiddenException('Bu tuzilma uchun chiqim tarixini ko‘rishga ruxsat yo‘q');
+    }
+  }
+
+  private async assertCanDeleteExpense(userId: string, role?: UserRole) {
+    if (this.isPrivilegedRole(role) || isSuperAdminRole(role)) {
+      return;
+    }
+
+    const user = await this.usersService.findById(userId);
+    if (!user) {
+      throw new ForbiddenException('Chiqimni o‘chirishga ruxsat yo‘q');
+    }
+
+    const permissions = normalizePermissions(
+      user.permissions as UserPermissionsMap | undefined,
+    );
+
+    if (
+      !hasPageAction(permissions, WAREHOUSE_EXPENSE_PAGE_PATH, 'delete', false)
+    ) {
+      throw new ForbiddenException('Chiqimni o‘chirishga ruxsat yo‘q');
+    }
+  }
+
+  private async resolveExpenseListScope(
+    queryStructureId: string | undefined,
+    userId: string,
+    role?: UserRole,
+  ): Promise<{ mode: 'all' } | { mode: 'single'; structureId: string }> {
+    const requested = queryStructureId?.trim();
+
+    if (requested) {
+      if (!Types.ObjectId.isValid(requested)) {
+        throw new BadRequestException('Tuzilma identifikatori noto‘g‘ri');
+      }
+      await this.assertStructureAccess(requested, userId, role);
+      return { mode: 'single', structureId: requested };
+    }
+
+    if (await this.canBrowseExpensesAcrossStructures(userId, role)) {
+      return { mode: 'all' };
+    }
+
+    const structureId = await this.resolveViewerStructureIdOrFail(userId, role);
+    return { mode: 'single', structureId };
   }
 
   async listLocations(userId: string, role?: UserRole) {
@@ -636,6 +731,8 @@ export class WarehouseService {
 
   private expenseGroupToPublic(row: {
     code: string;
+    structureId: Types.ObjectId;
+    structureName?: string;
     reasonKey: string;
     reasonLabel: string;
     comment?: string;
@@ -650,6 +747,8 @@ export class WarehouseService {
   }) {
     return {
       code: row.code,
+      structureId: String(row.structureId),
+      structureName: row.structureName?.trim() || '—',
       reasonKey: row.reasonKey,
       reasonLabel: row.reasonLabel,
       comment: row.comment?.trim() || '',
@@ -671,14 +770,15 @@ export class WarehouseService {
     userId: string,
     role?: UserRole,
   ) {
-    const structureId = await this.resolveViewerStructureIdOrFail(userId, role);
+    const scope = await this.resolveExpenseListScope(query.structureId, userId, role);
     const page = query.page ?? 1;
     const limit = query.limit ?? 10;
     const skip = (page - 1) * limit;
 
-    const matchClauses: Record<string, unknown>[] = [
-      { structureId: new Types.ObjectId(structureId) },
-    ];
+    const matchClauses: Record<string, unknown>[] = [];
+    if (scope.mode === 'single') {
+      matchClauses.push({ structureId: new Types.ObjectId(scope.structureId) });
+    }
 
     appendDateRangeClause(matchClauses, 'createdAt', query.dateFrom, query.dateTo);
 
@@ -701,14 +801,19 @@ export class WarehouseService {
     }
 
     const match =
-      matchClauses.length === 1 ? matchClauses[0] : { $and: matchClauses };
+      matchClauses.length === 0
+        ? {}
+        : matchClauses.length === 1
+          ? matchClauses[0]
+          : { $and: matchClauses };
 
     const [facetResult] = await this.expenseModel
       .aggregate([
         { $match: match },
         {
           $group: {
-            _id: '$code',
+            _id: { structureId: '$structureId', code: '$code' },
+            structureId: { $first: '$structureId' },
             code: { $first: '$code' },
             reasonKey: { $first: '$reasonKey' },
             reasonLabel: { $first: '$reasonLabel' },
@@ -716,6 +821,24 @@ export class WarehouseService {
             createdAt: { $max: '$createdAt' },
             createdBy: { $first: '$createdBy' },
             items: { $push: '$items' },
+          },
+        },
+        {
+          $lookup: {
+            from: 'structures',
+            localField: 'structureId',
+            foreignField: '_id',
+            as: 'structure',
+          },
+        },
+        {
+          $addFields: {
+            structureName: {
+              $ifNull: [
+                { $arrayElemAt: ['$structure.shortName', 0] },
+                { $arrayElemAt: ['$structure.fullName', 0] },
+              ],
+            },
           },
         },
         {
@@ -759,7 +882,7 @@ export class WarehouseService {
             },
           },
         },
-        { $project: { creator: 0, items: 0 } },
+        { $project: { creator: 0, items: 0, structure: 0 } },
         { $sort: { createdAt: -1 } },
         {
           $facet: {
@@ -772,6 +895,8 @@ export class WarehouseService {
 
     const rows = (facetResult?.items ?? []) as Array<{
       code: string;
+      structureId: Types.ObjectId;
+      structureName?: string;
       reasonKey: string;
       reasonLabel: string;
       comment?: string;
@@ -795,12 +920,29 @@ export class WarehouseService {
     };
   }
 
-  async findExpenseByCode(code: string, userId: string, role?: UserRole) {
-    const structureId = await this.resolveViewerStructureIdOrFail(userId, role);
+  async findExpenseByCode(
+    code: string,
+    userId: string,
+    role?: UserRole,
+    queryStructureId?: string,
+  ) {
     const normalizedCode = code?.trim();
 
     if (!normalizedCode) {
       throw new BadRequestException('Chiqim kodi noto‘g‘ri');
+    }
+
+    let structureId: string;
+    const requestedStructureId = queryStructureId?.trim();
+
+    if (requestedStructureId) {
+      if (!Types.ObjectId.isValid(requestedStructureId)) {
+        throw new BadRequestException('Tuzilma identifikatori noto‘g‘ri');
+      }
+      await this.assertStructureAccess(requestedStructureId, userId, role);
+      structureId = requestedStructureId;
+    } else {
+      structureId = await this.resolveViewerStructureIdOrFail(userId, role);
     }
 
     const docs = await this.expenseModel
@@ -825,6 +967,10 @@ export class WarehouseService {
     );
 
     const creator = await this.usersService.findById(String(docs[0].createdBy));
+    const structure = await this.structureModel
+      .findById(docs[0].structureId)
+      .select('fullName shortName')
+      .exec();
 
     const items = docs.flatMap((doc) =>
       doc.items.map((item) => ({
@@ -846,6 +992,9 @@ export class WarehouseService {
 
     return {
       code: docs[0].code,
+      structureId: String(docs[0].structureId),
+      structureName:
+        structure?.shortName?.trim() || structure?.fullName?.trim() || '—',
       reasonKey: docs[0].reasonKey,
       reasonLabel: docs[0].reasonLabel,
       comment: docs[0].comment?.trim() || '',
@@ -860,6 +1009,152 @@ export class WarehouseService {
       itemsCount: items.length,
       totalQuantity,
       items,
+    };
+  }
+
+  async deleteExpenseByCode(
+    code: string,
+    userId: string,
+    role?: UserRole,
+    queryStructureId?: string,
+  ) {
+    await this.assertCanDeleteExpense(userId, role);
+
+    const normalizedCode = code?.trim();
+    if (!normalizedCode) {
+      throw new BadRequestException('Chiqim kodi noto‘g‘ri');
+    }
+
+    let structureId: string;
+    const requestedStructureId = queryStructureId?.trim();
+
+    if (requestedStructureId) {
+      if (!Types.ObjectId.isValid(requestedStructureId)) {
+        throw new BadRequestException('Tuzilma identifikatori noto‘g‘ri');
+      }
+      await this.assertStructureAccess(requestedStructureId, userId, role);
+      structureId = requestedStructureId;
+    } else {
+      structureId = await this.resolveViewerStructureIdOrFail(userId, role);
+    }
+
+    const structureObjectId = new Types.ObjectId(structureId);
+    const docs = await this.expenseModel
+      .find({
+        structureId: structureObjectId,
+        code: normalizedCode,
+      })
+      .exec();
+
+    if (!docs.length) {
+      throw new NotFoundException('Chiqim topilmadi');
+    }
+
+    type RestoreRow = {
+      locationId: Types.ObjectId;
+      barcode: string;
+      itemKey: string;
+      name: string;
+      characteristics: string;
+      quantity: number;
+    };
+
+    const restoreByKey = new Map<string, RestoreRow>();
+
+    for (const doc of docs) {
+      const locationId = doc.locationId;
+      for (const item of doc.items ?? []) {
+        const barcode = item.barcode?.trim();
+        if (!barcode || item.quantity < 1) {
+          continue;
+        }
+        const key = `${String(locationId)}|${barcode}`;
+        const prev = restoreByKey.get(key);
+        if (prev) {
+          prev.quantity += item.quantity;
+          continue;
+        }
+        restoreByKey.set(key, {
+          locationId,
+          barcode,
+          itemKey: item.itemKey,
+          name: item.name,
+          characteristics: item.characteristics,
+          quantity: item.quantity,
+        });
+      }
+    }
+
+    const restoreItems = Array.from(restoreByKey.values());
+    if (!restoreItems.length) {
+      throw new BadRequestException('Chiqimda qaytariladigan tovar yo‘q');
+    }
+
+    const now = new Date();
+
+    for (const row of restoreItems) {
+      const restored = await this.inventoryModel
+        .updateOne(
+          {
+            structureId: structureObjectId,
+            locationId: row.locationId,
+            barcode: row.barcode,
+          },
+          {
+            $inc: { quantity: row.quantity },
+            $set: { updatedAt: now },
+          },
+        )
+        .exec();
+
+      if (restored.matchedCount > 0) {
+        continue;
+      }
+
+      await this.inventoryModel
+        .updateOne(
+          {
+            structureId: structureObjectId,
+            locationId: row.locationId,
+            itemKey: row.itemKey,
+          },
+          {
+            $inc: { quantity: row.quantity },
+            $set: { updatedAt: now },
+            $setOnInsert: {
+              structureId: structureObjectId,
+              locationId: row.locationId,
+              itemKey: row.itemKey,
+              name: row.name,
+              characteristics: row.characteristics,
+              barcode: row.barcode,
+              unitPrice: 0,
+            },
+          },
+          { upsert: true },
+        )
+        .exec();
+    }
+
+    const deleteResult = await this.expenseModel
+      .deleteMany({
+        structureId: structureObjectId,
+        code: normalizedCode,
+      })
+      .exec();
+
+    if (!deleteResult.deletedCount) {
+      throw new NotFoundException('Chiqim topilmadi');
+    }
+
+    const restoredQuantity = restoreItems.reduce((sum, row) => sum + row.quantity, 0);
+
+    return {
+      code: normalizedCode,
+      structureId,
+      deletedDocuments: deleteResult.deletedCount,
+      restoredLines: restoreItems.length,
+      restoredQuantity,
     };
   }
 }

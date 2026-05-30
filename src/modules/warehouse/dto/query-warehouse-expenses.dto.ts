@@ -1,5 +1,14 @@
 import { Type } from 'class-transformer';
-import { IsInt, IsOptional, IsString, Matches, Max, Min } from 'class-validator';
+import {
+  IsInt,
+  IsMongoId,
+  IsOptional,
+  IsString,
+  Matches,
+  Max,
+  Min,
+  ValidateIf,
+} from 'class-validator';
 
 const DATE_ONLY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -34,4 +43,8 @@ export class QueryWarehouseExpensesDto {
   @IsOptional()
   @IsString()
   reasonKey?: string;
+
+  @ValidateIf((query) => Boolean(query.structureId?.trim()))
+  @IsMongoId()
+  structureId?: string;
 }

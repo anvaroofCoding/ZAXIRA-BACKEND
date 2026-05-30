@@ -16,6 +16,7 @@ import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { ParseMongoIdPipe } from '../../common/pipes/parse-mongo-id.pipe';
 import { RolesGuard } from '../../common/guards/roles.guard';
 import type { JwtPayload } from '../auth/interfaces/jwt-payload.interface';
+import { NotificationsEventsService } from '../notifications/notifications-events.service';
 import { PERMISSION_CATALOG } from './constants/permission-catalog';
 import { QueryUsersDto } from './dto/query-users.dto';
 import {
@@ -27,11 +28,16 @@ import {
   UpdateUserValidationPipe,
 } from './pipes/update-user-validation.pipe';
 import { UsersService } from './users.service';
+import { normalizePermissions } from './utils/permissions.util';
+import { UserPermissionsMap } from './types/page-permission.type';
 
 @Controller('users')
 @UseGuards(JwtAuthGuard)
 export class UsersController {
-  constructor(private readonly usersService: UsersService) {}
+  constructor(
+    private readonly usersService: UsersService,
+    private readonly notificationsEvents: NotificationsEventsService,
+  ) {}
 
   @Get('permission-catalog')
   getPermissionCatalog() {
@@ -67,11 +73,31 @@ export class UsersController {
   }
 
   @Patch(':id')
-  update(
+  async update(
     @Param('id', ParseMongoIdPipe) id: string,
     @Body(UpdateUserValidationPipe) payload: object,
   ) {
-    return this.usersService.updateFromDto(id, payload as UpdateUserPayload);
+    const dto = payload as UpdateUserPayload;
+    let previousPermissions: UserPermissionsMap | undefined;
+
+    if (dto.permissions !== undefined) {
+      const existing = await this.usersService.findById(id);
+      previousPermissions = normalizePermissions(
+        existing?.permissions as UserPermissionsMap,
+      );
+    }
+
+    const user = await this.usersService.updateFromDto(id, dto);
+
+    if (dto.permissions !== undefined && previousPermissions) {
+      await this.notificationsEvents.handlePermissionsUpdated(
+        id,
+        previousPermissions,
+        normalizePermissions(user.permissions as UserPermissionsMap),
+      );
+    }
+
+    return user;
   }
 
   @Delete(':id/permanent')

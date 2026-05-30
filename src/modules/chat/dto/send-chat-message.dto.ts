@@ -37,4 +37,8 @@ export class SendChatMessageDto {
   @IsOptional()
   @IsString()
   supportRequesterId?: string;
+
+  @IsOptional()
+  @IsString()
+  replyToMessageId?: string;
 }

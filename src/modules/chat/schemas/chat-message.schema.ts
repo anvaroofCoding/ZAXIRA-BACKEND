@@ -58,6 +58,26 @@ export class ChatMessage {
   })
   reactions!: Array<{ emoji: string; userId: Types.ObjectId }>;
 
+  @Prop({
+    type: {
+      messageId: { type: Types.ObjectId, ref: 'ChatMessage', required: true },
+      senderId: { type: Types.ObjectId, ref: 'User', required: true },
+      senderName: { type: String, default: '' },
+      text: { type: String, default: '' },
+      hasImage: { type: Boolean, default: false },
+      hasFile: { type: Boolean, default: false },
+    },
+    default: null,
+  })
+  replyTo?: {
+    messageId: Types.ObjectId;
+    senderId: Types.ObjectId;
+    senderName: string;
+    text: string;
+    hasImage: boolean;
+    hasFile: boolean;
+  } | null;
+
   createdAt?: Date;
   updatedAt?: Date;
 }

@@ -10,6 +10,7 @@ import {
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import type { JwtPayload } from '../auth/interfaces/jwt-payload.interface';
+import { MarkChatReadDto } from './dto/mark-chat-read.dto';
 import { QueryChatMessagesDto } from './dto/query-chat-messages.dto';
 import { SendChatMessageDto } from './dto/send-chat-message.dto';
 import { ChatService } from './chat.service';
@@ -19,6 +20,16 @@ import { ChatRoomType } from './schemas/chat-message.schema';
 @UseGuards(JwtAuthGuard)
 export class ChatController {
   constructor(private readonly chatService: ChatService) {}
+
+  @Get('summary')
+  getSummary(@CurrentUser() user: JwtPayload) {
+    return this.chatService.getSummary(user.sub, user.role);
+  }
+
+  @Post('mark-read')
+  markRead(@Body() dto: MarkChatReadDto, @CurrentUser() user: JwtPayload) {
+    return this.chatService.markAsRead(dto, user.sub, user.role);
+  }
 
   @Get('messages')
   listMessages(

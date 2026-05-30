@@ -13,6 +13,7 @@ import { UserRole } from '../../common/enums/user-role.enum';
 import { appendDateRangeClause } from '../../common/utils/date-range-filter.util';
 import { isSuperAdminRole } from '../../common/utils/super-admin.util';
 import { PurchaseRequestsEventsService } from '../realtime/purchase-requests-events.service';
+import { NotificationsEventsService } from '../notifications/notifications-events.service';
 import { UsersService } from '../users/users.service';
 import { ConfirmBossDecisionDto } from './dto/confirm-boss-decision.dto';
 import { CreatePurchaseRequestDto } from './dto/create-purchase-request.dto';
@@ -61,8 +62,17 @@ export class PurchaseRequestsService {
     private readonly sequenceModel: Model<SequenceDocument>,
     private readonly usersService: UsersService,
     private readonly purchaseRequestsEvents: PurchaseRequestsEventsService,
+    private readonly notificationsEvents: NotificationsEventsService,
     private readonly purchaseRequestFilesService: PurchaseRequestFilesService,
   ) {}
+
+  private emitPurchaseRequestChanged(
+    request: PurchaseRequestDocument,
+    event: 'created' | 'updated',
+  ) {
+    this.purchaseRequestsEvents.notifyChanged(request, event);
+    void this.notificationsEvents.handlePurchaseRequestChanged(request, event);
+  }
 
   private async nextRequestCode(structureShortName?: string | null, structureId?: string | null) {
     const sequenceKey = structureId
@@ -1191,7 +1201,7 @@ export class PurchaseRequestsService {
 
     await request.save();
 
-    this.purchaseRequestsEvents.notifyChanged(request, 'updated');
+    this.emitPurchaseRequestChanged(request, 'updated');
 
     return this.toPublic(request, userId);
   }
@@ -1263,7 +1273,7 @@ export class PurchaseRequestsService {
       throw error;
     }
 
-    this.purchaseRequestsEvents.notifyChanged(request, 'created');
+    this.emitPurchaseRequestChanged(request, 'created');
 
     return this.toPublic(request, createdById);
   }
@@ -1336,7 +1346,7 @@ export class PurchaseRequestsService {
     request.status = this.recomputeStatus(request);
     await request.save();
 
-    this.purchaseRequestsEvents.notifyChanged(request, 'updated');
+    this.emitPurchaseRequestChanged(request, 'updated');
 
     return this.toPublic(request, userId);
   }
@@ -1386,7 +1396,7 @@ export class PurchaseRequestsService {
 
     await request.save();
 
-    this.purchaseRequestsEvents.notifyChanged(request, 'updated');
+    this.emitPurchaseRequestChanged(request, 'updated');
 
     return this.toPublic(request, userId);
   }
@@ -1444,7 +1454,7 @@ export class PurchaseRequestsService {
 
     await request.save();
 
-    this.purchaseRequestsEvents.notifyChanged(request, 'updated');
+    this.emitPurchaseRequestChanged(request, 'updated');
 
     return this.toPublic(request, userId);
   }
