@@ -8,6 +8,7 @@ import {
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
+import { MongoServerError } from 'mongodb';
 import { UserRole } from '../../common/enums/user-role.enum';
 import { appendDateRangeClause } from '../../common/utils/date-range-filter.util';
 import { isSuperAdminRole } from '../../common/utils/super-admin.util';
@@ -148,6 +149,134 @@ export class WarehouseDispatchesService {
       throw new BadRequestException(
         `«${nomenclatureCode}» nomeklatura raqami allaqachon «${existing.name}» tovariga biriktirilgan. Boshqa nom bilan ishlatib bo‘lmaydi.`,
       );
+    }
+  }
+
+  private buildReceiptInventoryMatchFilters(
+    item: WarehouseDispatchDocument['items'][number],
+    receiptNomenclatureCode: string,
+    itemKey: string,
+  ) {
+    const legacyBarcode =
+      item.sourceBarcode?.trim() ||
+      computeWarehouseBarcode(item.name, item.characteristics);
+    const legacyItemKey = buildWarehouseItemKey(item.name, item.characteristics);
+    const matchFilters: Record<string, unknown>[] = [{ itemKey }];
+
+    if (receiptNomenclatureCode) {
+      matchFilters.push({ receiptNomenclatureCode });
+      matchFilters.push({ barcode: receiptNomenclatureCode });
+    }
+
+    matchFilters.push({ barcode: legacyBarcode });
+    matchFilters.push({ itemKey: legacyItemKey });
+
+    return matchFilters;
+  }
+
+  private async applyReceiptToInventory(
+    receiverStructureId: string,
+    locationObjectId: Types.ObjectId,
+    item: WarehouseDispatchDocument['items'][number],
+    qty: number,
+    unitPrice: number,
+    now: Date,
+  ) {
+    const receiptNomenclatureCode = normalizeNomenclatureCode(
+      item.receiptNomenclatureCode ?? '',
+    );
+    const itemKey = buildInventoryItemKey(
+      item.name,
+      item.characteristics,
+      receiptNomenclatureCode,
+    );
+    const barcode = receiptNomenclatureCode
+      ? resolveInventoryBarcodeForStorage(
+          item.name,
+          item.characteristics,
+          receiptNomenclatureCode,
+        )
+      : item.sourceBarcode?.trim() ||
+        computeWarehouseBarcode(item.name, item.characteristics);
+    const structureObjectId = new Types.ObjectId(receiverStructureId);
+    const matchFilters = this.buildReceiptInventoryMatchFilters(
+      item,
+      receiptNomenclatureCode,
+      itemKey,
+    );
+
+    const setFields: Record<string, unknown> = {
+      lastReceiptAt: now,
+      name: item.name,
+      characteristics: item.characteristics,
+    };
+
+    if (unitPrice > 0) {
+      setFields.unitPrice = unitPrice;
+    }
+
+    if (receiptNomenclatureCode) {
+      setFields.receiptNomenclatureCode = receiptNomenclatureCode;
+      setFields.barcode = receiptNomenclatureCode;
+      setFields.itemKey = itemKey;
+    }
+
+    const findExisting = () =>
+      this.inventoryModel
+        .findOne({
+          structureId: structureObjectId,
+          locationId: locationObjectId,
+          $or: matchFilters,
+        })
+        .exec();
+
+    let existing = await findExisting();
+
+    if (existing) {
+      await this.inventoryModel
+        .updateOne(
+          { _id: existing._id },
+          { $inc: { quantity: qty }, $set: setFields },
+        )
+        .exec();
+      return;
+    }
+
+    try {
+      await this.inventoryModel.create({
+        structureId: structureObjectId,
+        locationId: locationObjectId,
+        itemKey,
+        name: item.name,
+        characteristics: item.characteristics,
+        barcode,
+        ...(receiptNomenclatureCode
+          ? { receiptNomenclatureCode }
+          : {}),
+        quantity: qty,
+        unitPrice: unitPrice > 0 ? unitPrice : 0,
+        lastReceiptAt: now,
+      });
+    } catch (error: unknown) {
+      if (error instanceof MongoServerError && error.code === 11000) {
+        existing = await findExisting();
+
+        if (existing) {
+          await this.inventoryModel
+            .updateOne(
+              { _id: existing._id },
+              { $inc: { quantity: qty }, $set: setFields },
+            )
+            .exec();
+          return;
+        }
+
+        throw new BadRequestException(
+          'Omborga qabul qilishda nomlar yoki shtrix-kodlar ziddiyatli. Mavjud ombor qatorlarini tekshiring.',
+        );
+      }
+
+      throw error;
     }
   }
 
@@ -611,6 +740,16 @@ export class WarehouseDispatchesService {
     );
 
     if (hasPendingPurchaseItems) {
+      if (request.status !== PurchaseRequestStatus.PURCHASING) {
+        request.status = PurchaseRequestStatus.PURCHASING;
+        await request.save();
+        this.purchaseRequestsEvents.notifyChanged(request, 'updated');
+        void this.notificationsEvents.handlePurchaseRequestChanged(
+          request,
+          'updated',
+        );
+      }
+
       return;
     }
 
@@ -1217,12 +1356,11 @@ export class WarehouseDispatchesService {
         );
       }
 
-      const incomingItemNomenclature =
-        received.nomenclatureCode?.trim() ||
-        item.receiptNomenclatureCode?.trim() ||
-        (requiresItemNomenclature
-          ? this.resolveItemNomenclatureCode(dispatch, item)
-          : '');
+      const incomingItemNomenclature = requiresItemNomenclature
+        ? received.nomenclatureCode?.trim() || ''
+        : received.nomenclatureCode?.trim() ||
+          item.receiptNomenclatureCode?.trim() ||
+          this.resolveItemNomenclatureCode(dispatch, item);
 
       if (requiresItemNomenclature && !incomingItemNomenclature) {
         throw new BadRequestException(
@@ -1324,165 +1462,15 @@ export class WarehouseDispatchesService {
         );
       }
 
-      for (const { item } of mergedByKey.values()) {
-        const receiptNomenclatureCode = normalizeNomenclatureCode(
-          item.receiptNomenclatureCode ?? '',
+      for (const { item, qty, unitPrice } of mergedByKey.values()) {
+        await this.applyReceiptToInventory(
+          receiverStructureId,
+          locationObjectId,
+          item,
+          qty,
+          unitPrice,
+          now,
         );
-        if (!receiptNomenclatureCode) {
-          continue;
-        }
-
-        const legacyBarcode =
-          item.sourceBarcode?.trim() ||
-          computeWarehouseBarcode(item.name, item.characteristics);
-
-        await this.inventoryModel
-          .updateOne(
-            {
-              structureId: new Types.ObjectId(receiverStructureId),
-              locationId: locationObjectId,
-              barcode: legacyBarcode,
-              $or: [
-                { receiptNomenclatureCode: { $exists: false } },
-                { receiptNomenclatureCode: '' },
-              ],
-            },
-            {
-              $set: {
-                receiptNomenclatureCode,
-                barcode: receiptNomenclatureCode,
-                itemKey: buildInventoryItemKey(
-                  item.name,
-                  item.characteristics,
-                  receiptNomenclatureCode,
-                ),
-              },
-            },
-          )
-          .exec();
-      }
-
-      const bulkOps = Array.from(mergedByKey.values()).map(
-        ({ item, qty, unitPrice }) => {
-          const receiptNomenclatureCode = normalizeNomenclatureCode(
-            item.receiptNomenclatureCode ?? '',
-          );
-          const itemKey = buildInventoryItemKey(
-            item.name,
-            item.characteristics,
-            receiptNomenclatureCode,
-          );
-          const barcode = receiptNomenclatureCode
-            ? resolveInventoryBarcodeForStorage(
-                item.name,
-                item.characteristics,
-                receiptNomenclatureCode,
-              )
-            : item.sourceBarcode?.trim() ||
-              computeWarehouseBarcode(item.name, item.characteristics);
-          const setOnInsert: Record<string, unknown> = {
-            structureId: new Types.ObjectId(receiverStructureId),
-            locationId: locationObjectId,
-            itemKey,
-            name: item.name,
-            characteristics: item.characteristics,
-            barcode,
-          };
-          const setFields: Record<string, unknown> = { lastReceiptAt: now };
-
-          if (unitPrice > 0) {
-            setFields.unitPrice = unitPrice;
-          } else {
-            setOnInsert.unitPrice = 0;
-          }
-
-          if (receiptNomenclatureCode) {
-            setOnInsert.receiptNomenclatureCode = receiptNomenclatureCode;
-            setFields.receiptNomenclatureCode = receiptNomenclatureCode;
-          }
-
-          const inventorySet: Record<string, unknown> = {
-            ...setFields,
-            itemKey,
-            name: item.name,
-            characteristics: item.characteristics,
-            barcode,
-          };
-
-          const filter: Record<string, unknown> = {
-            structureId: new Types.ObjectId(receiverStructureId),
-            locationId: locationObjectId,
-          };
-
-          if (receiptNomenclatureCode) {
-            filter.receiptNomenclatureCode = receiptNomenclatureCode;
-          } else {
-            filter.barcode = barcode;
-          }
-
-          return {
-            updateOne: {
-              filter,
-              update: {
-                $setOnInsert: setOnInsert,
-                $inc: { quantity: qty },
-                $set: inventorySet,
-              },
-              upsert: true,
-            },
-          };
-        },
-      );
-
-      if (bulkOps.length) {
-        await this.inventoryModel.collection.bulkWrite(bulkOps, {
-          ordered: false,
-        });
-      }
-
-      for (const { item } of mergedByKey.values()) {
-        const receiptNomenclatureCode = normalizeNomenclatureCode(
-          item.receiptNomenclatureCode ?? '',
-        );
-        if (!receiptNomenclatureCode) {
-          continue;
-        }
-
-        const legacyBarcode =
-          item.sourceBarcode?.trim() ||
-          computeWarehouseBarcode(item.name, item.characteristics);
-
-        await this.inventoryModel
-          .updateOne(
-            {
-              structureId: new Types.ObjectId(receiverStructureId),
-              locationId: locationObjectId,
-              $or: [
-                { receiptNomenclatureCode },
-                { barcode: legacyBarcode },
-                {
-                  itemKey: buildWarehouseItemKey(
-                    item.name,
-                    item.characteristics,
-                  ),
-                },
-              ],
-            },
-            {
-              $set: {
-                receiptNomenclatureCode,
-                barcode: receiptNomenclatureCode,
-                itemKey: buildInventoryItemKey(
-                  item.name,
-                  item.characteristics,
-                  receiptNomenclatureCode,
-                ),
-                name: item.name,
-                characteristics: item.characteristics,
-              },
-            },
-          )
-          .exec();
       }
     }
 

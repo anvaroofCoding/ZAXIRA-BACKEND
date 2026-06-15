@@ -645,6 +645,54 @@ export class PurchaseRequestsController {
     );
   }
 
+  @Post(':id/edit-session')
+  createEditSession(
+    @Param('id', ParseMongoIdPipe) id: string,
+    @CurrentUser() user: JwtPayload,
+  ) {
+    return this.purchaseRequestsService.createEditSession(
+      user.sub,
+      id,
+      user.role,
+    );
+  }
+
+  @Post(':id/update-with-documents')
+  @UseInterceptors(
+    FileFieldsInterceptor(
+      [
+        { name: 'bildirgi', maxCount: 1 },
+        { name: 'kelishuv', maxCount: 1 },
+      ],
+      {
+        storage: memoryStorage(),
+        limits: { fileSize: 10 * 1024 * 1024 },
+      },
+    ),
+  )
+  updateWithDocuments(
+    @Param('id', ParseMongoIdPipe) id: string,
+    @UploadedFiles()
+    files: {
+      bildirgi?: Express.Multer.File[];
+      kelishuv?: Express.Multer.File[];
+    },
+    @Body('payload') payload: string | undefined,
+    @CurrentUser() user: JwtPayload,
+  ) {
+    const dto = this.parseUpdatePurchaseRequestPayload(payload);
+    return this.purchaseRequestsService.updateWithDocuments(
+      id,
+      dto,
+      user.sub,
+      user.role,
+      {
+        bildirgi: files?.bildirgi?.[0],
+        kelishuv: files?.kelishuv?.[0],
+      },
+    );
+  }
+
   @Post(':id/update')
   updateByPost(
     @Param('id', ParseMongoIdPipe) id: string,
@@ -748,6 +796,25 @@ export class PurchaseRequestsController {
     return this.normalizeSessionDocType(value);
   }
 
+  private parseUpdatePurchaseRequestPayload(
+    payload: string | undefined,
+  ): UpdatePurchaseRequestDto {
+    if (!payload?.trim()) {
+      throw new BadRequestException('Ariza ma’lumotlari yuborilmadi');
+    }
+
+    try {
+      const parsed = JSON.parse(payload) as Record<string, unknown>;
+      return this.purchaseRequestsService.normalizeUpdatePayload(parsed);
+    } catch (error) {
+      if (error instanceof BadRequestException) {
+        throw error;
+      }
+
+      throw new BadRequestException('Ariza ma’lumotlari noto‘g‘ri formatda yuborildi');
+    }
+  }
+
   private parseCompletePurchaseBody(raw: {
     vendorName?: string;
     comment?: string;
@@ -777,11 +844,48 @@ export class PurchaseRequestsController {
       fileLabels = [];
     }
 
+    const normalizedPurchasedItems = purchasedItems.map((row, index) => {
+      const rawRow = row as unknown as Record<string, unknown>;
+
+      if (
+        !Number.isFinite(Number(rawRow.itemIndex)) ||
+        !Number.isFinite(Number(rawRow.amount))
+      ) {
+        throw new BadRequestException(
+          `${index + 1}-tovar ma’lumotlari noto‘g‘ri`,
+        );
+      }
+
+      const rawQuantity = rawRow.quantity;
+      const quantity =
+        rawQuantity == null || rawQuantity === ''
+          ? undefined
+          : Number(rawQuantity);
+
+      if (quantity != null && (!Number.isFinite(quantity) || quantity < 1)) {
+        throw new BadRequestException(
+          `${index + 1}-tovar soni noto‘g‘ri`,
+        );
+      }
+
+      return {
+        itemIndex: Number(rawRow.itemIndex),
+        amount: Number(rawRow.amount),
+        name: typeof rawRow.name === 'string' ? rawRow.name : undefined,
+        characteristics:
+          typeof rawRow.characteristics === 'string'
+            ? rawRow.characteristics
+            : undefined,
+        quantity,
+        unit: typeof rawRow.unit === 'string' ? rawRow.unit : undefined,
+      };
+    });
+
     return {
       vendorName: raw.vendorName?.trim() ?? '',
       comment: raw.comment,
       links,
-      purchasedItems,
+      purchasedItems: normalizedPurchasedItems,
       fileLabels,
     };
   }

@@ -17,6 +17,10 @@ export class PurchaseRequestSession {
   @Prop({ type: Types.ObjectId, ref: 'User', required: true })
   userId!: Types.ObjectId;
 
+  /** Tahrirlash rejimida — qaysi ariza yangilanayotgani */
+  @Prop({ type: Types.ObjectId, ref: 'PurchaseRequest' })
+  editingRequestId?: Types.ObjectId;
+
   @Prop({ trim: true, default: '' })
   title!: string;
 

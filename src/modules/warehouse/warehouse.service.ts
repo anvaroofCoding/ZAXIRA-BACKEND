@@ -9,6 +9,10 @@ import { Model, Types } from 'mongoose';
 import { UserRole } from '../../common/enums/user-role.enum';
 import { isSuperAdminRole } from '../../common/utils/super-admin.util';
 import { UsersService } from '../users/users.service';
+import {
+  TRANSFER_RECEIPT_PAGE_PATH,
+  WAREHOUSE_RECEIPT_PAGE_PATH,
+} from '../users/constants/disabled-page-actions';
 import { UserPermissionsMap } from '../users/types/page-permission.type';
 import {
   hasPageAccess,
@@ -320,8 +324,55 @@ export class WarehouseService {
     role?: UserRole,
   ) {
     const structureId = await this.resolveViewerStructureIdOrFail(userId, role);
-    await this.assertStructureHasWarehouse(structureId);
+    await this.assertStructureAccessibleForWarehouseViewer(
+      structureId,
+      userId,
+      role,
+    );
     return structureId;
+  }
+
+  private async assertStructureAccessibleForWarehouseViewer(
+    structureId: string,
+    userId: string,
+    role?: UserRole,
+  ) {
+    if (isSuperAdminRole(role)) {
+      return;
+    }
+
+    const structure = await this.structureModel.findById(structureId).exec();
+
+    if (!structure) {
+      throw new NotFoundException('Tuzilma topilmadi');
+    }
+
+    if (structure.hasWarehouse) {
+      return;
+    }
+
+    const user = await this.usersService.findById(userId);
+    const permissions = normalizePermissions(
+      user?.permissions as UserPermissionsMap | undefined,
+    );
+    const canReceive =
+      hasPageAccess(permissions, WAREHOUSE_RECEIPT_PAGE_PATH, false) ||
+      hasPageAccess(permissions, TRANSFER_RECEIPT_PAGE_PATH, false);
+
+    if (!canReceive) {
+      throw new BadRequestException('Ushbu tuzilmaning ombori mavjud emas');
+    }
+
+    const hasActiveLocations = await this.locationModel
+      .countDocuments({
+        structureId: new Types.ObjectId(structureId),
+        isActive: true,
+      })
+      .exec();
+
+    if (!hasActiveLocations) {
+      throw new BadRequestException('Ushbu tuzilmaning ombori mavjud emas');
+    }
   }
 
   private async assertCanDeleteExpense(userId: string, role?: UserRole) {

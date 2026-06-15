@@ -530,6 +530,9 @@ export class PurchaseRequestsService implements OnModuleInit {
       purchasePeriodYear: session.purchasePeriodYear ?? null,
       purchasePeriodQuarter: session.purchasePeriodQuarter ?? null,
       purchasePeriodMonth: session.purchasePeriodMonth ?? null,
+      editingRequestId: session.editingRequestId
+        ? String(session.editingRequestId)
+        : null,
       createdAt: session.createdAt ?? null,
       updatedAt: session.updatedAt ?? null,
     };
@@ -957,9 +960,11 @@ export class PurchaseRequestsService implements OnModuleInit {
       canEditInReview,
       canResubmit,
       canDelete,
-      canCompletePurchase:
-        request.status === PurchaseRequestStatus.PURCHASING &&
-        request.items.some((item) => this.isItemPending(item)),
+      pendingPurchaseItemCount: this.countPendingPurchaseItems(request),
+      pendingPurchaseQuantity: request.items
+        .filter((item) => this.isItemPending(item))
+        .reduce((sum, item) => sum + item.quantity, 0),
+      canCompletePurchase: this.canPurchasePendingItems(request),
       canRejectPurchase:
         request.status === PurchaseRequestStatus.PURCHASING &&
         !request.items.some((item) => item.isPurchased || item.isPurchaseUnavailable),
@@ -1257,6 +1262,28 @@ export class PurchaseRequestsService implements OnModuleInit {
     isPurchaseUnavailable?: boolean;
   }) {
     return !item.isPurchased && !item.isPurchaseUnavailable;
+  }
+
+  private countPendingPurchaseItems(request: PurchaseRequestDocument) {
+    return request.items.filter((item) => this.isItemPending(item)).length;
+  }
+
+  private buildPendingPurchaseItemElemMatch(): Record<string, unknown> {
+    return {
+      items: {
+        $elemMatch: {
+          isPurchased: { $ne: true },
+          isPurchaseUnavailable: { $ne: true },
+        },
+      },
+    };
+  }
+
+  private canPurchasePendingItems(request: PurchaseRequestDocument) {
+    return (
+      this.countPendingPurchaseItems(request) > 0 &&
+      this.purchasingInboxStatuses().includes(request.status)
+    );
   }
 
   private areAllItemsResolved(request: PurchaseRequestDocument) {
@@ -1802,6 +1829,7 @@ export class PurchaseRequestsService implements OnModuleInit {
           $match: {
             status: { $in: this.purchasingInboxStatuses() },
             'applicantStructure.structureId': { $exists: true, $ne: null },
+            ...this.buildPendingPurchaseItemElemMatch(),
           },
         },
         {
@@ -1833,6 +1861,7 @@ export class PurchaseRequestsService implements OnModuleInit {
           $in: this.purchasingInboxStatuses(),
         },
       },
+      this.buildPendingPurchaseItemElemMatch(),
     ];
 
     appendDateRangeClause(clauses, 'updatedAt', query.dateFrom, query.dateTo);
@@ -2031,10 +2060,14 @@ export class PurchaseRequestsService implements OnModuleInit {
       purchasingView: true,
     });
 
-    if (request.status !== PurchaseRequestStatus.PURCHASING) {
+    if (!this.canPurchasePendingItems(request)) {
       throw new BadRequestException(
-        'Faqat sotib olinadigan bosqichdagi arizani xarid qilish mumkin',
+        'Xarid qilinadigan tovarlar qolmadi yoki ariza ushbu bosqichda emas',
       );
+    }
+
+    if (request.status !== PurchaseRequestStatus.PURCHASING) {
+      request.status = PurchaseRequestStatus.PURCHASING;
     }
 
     const vendorName = input.vendorName?.trim() ?? '';
@@ -2092,6 +2125,18 @@ export class PurchaseRequestsService implements OnModuleInit {
         throw new BadRequestException('Tovar summalari noto‘g‘ri');
       }
 
+      const requestedQuantity = item.quantity;
+      const purchasedQuantity =
+        row.quantity != null && row.quantity >= 1
+          ? Math.round(row.quantity)
+          : requestedQuantity;
+
+      if (purchasedQuantity > requestedQuantity) {
+        throw new BadRequestException(
+          `${row.itemIndex + 1}-tovar uchun kiritilgan son so‘ralgan miqdordan ko‘p`,
+        );
+      }
+
       purchasedIndexes.add(row.itemIndex);
     }
 
@@ -2105,6 +2150,18 @@ export class PurchaseRequestsService implements OnModuleInit {
     );
 
     const newItemAmounts: Array<{ itemIndex: number; amount: number }> = [];
+    const remainingItemsToInsert: Array<{
+      afterIndex: number;
+      item: {
+        name: string;
+        characteristics: string;
+        quantity: number;
+        unit: string;
+        manufacturingCountry: string;
+        isPurchased: boolean;
+        isPurchaseUnavailable: boolean;
+      };
+    }> = [];
 
     for (const row of input.purchasedItems) {
       const item = request.items[row.itemIndex];
@@ -2118,17 +2175,34 @@ export class PurchaseRequestsService implements OnModuleInit {
       const nextName = row.name?.trim() || originalSnapshot.name;
       const nextCharacteristics =
         row.characteristics?.trim() || originalSnapshot.characteristics;
-      const nextQuantity =
+      const purchasedQuantity =
         row.quantity != null && row.quantity >= 1
           ? Math.round(row.quantity)
           : originalSnapshot.quantity;
       const nextUnit = row.unit?.trim() ?? originalSnapshot.unit;
       const amount = Math.round(row.amount);
+      const isPartialQuantity = purchasedQuantity < originalSnapshot.quantity;
+
+      if (isPartialQuantity) {
+        remainingItemsToInsert.push({
+          afterIndex: row.itemIndex,
+          item: {
+            name: originalSnapshot.name,
+            characteristics: originalSnapshot.characteristics,
+            quantity: originalSnapshot.quantity - purchasedQuantity,
+            unit: originalSnapshot.unit,
+            manufacturingCountry: item.manufacturingCountry?.trim() ?? '',
+            isPurchased: false,
+            isPurchaseUnavailable: false,
+          },
+        });
+      }
 
       const isChanged =
+        isPartialQuantity ||
         nextName !== originalSnapshot.name ||
         nextCharacteristics !== originalSnapshot.characteristics ||
-        nextQuantity !== originalSnapshot.quantity ||
+        purchasedQuantity !== originalSnapshot.quantity ||
         nextUnit !== originalSnapshot.unit;
 
       if (isChanged) {
@@ -2144,7 +2218,7 @@ export class PurchaseRequestsService implements OnModuleInit {
           originalUnit: originalSnapshot.unit,
           deliveredName: nextName,
           deliveredCharacteristics: nextCharacteristics,
-          deliveredQuantity: nextQuantity,
+          deliveredQuantity: purchasedQuantity,
           deliveredUnit: nextUnit,
           amount,
         });
@@ -2152,7 +2226,7 @@ export class PurchaseRequestsService implements OnModuleInit {
 
       item.name = nextName;
       item.characteristics = nextCharacteristics;
-      item.quantity = nextQuantity;
+      item.quantity = purchasedQuantity;
       item.unit = nextUnit;
       item.purchaseAmount = amount;
       item.isPurchased = true;
@@ -2161,6 +2235,12 @@ export class PurchaseRequestsService implements OnModuleInit {
 
       newItemAmounts.push({ itemIndex: row.itemIndex, amount });
     }
+
+    remainingItemsToInsert
+      .sort((left, right) => right.afterIndex - left.afterIndex)
+      .forEach(({ afterIndex, item: remainingItem }) => {
+        request.items.splice(afterIndex + 1, 0, remainingItem);
+      });
 
     request.markModified('items');
 
@@ -2236,10 +2316,14 @@ export class PurchaseRequestsService implements OnModuleInit {
       purchasingView: true,
     });
 
-    if (request.status !== PurchaseRequestStatus.PURCHASING) {
+    if (!this.canPurchasePendingItems(request)) {
       throw new BadRequestException(
-        'Faqat sotib olinadigan bosqichdagi arizada tovarlarni belgilash mumkin',
+        'Xarid qilinadigan tovarlar qolmadi yoki ariza ushbu bosqichda emas',
       );
+    }
+
+    if (request.status !== PurchaseRequestStatus.PURCHASING) {
+      request.status = PurchaseRequestStatus.PURCHASING;
     }
 
     const comment = dto.comment.trim();
@@ -2250,50 +2334,120 @@ export class PurchaseRequestsService implements OnModuleInit {
       );
     }
 
-    const uniqueIndexes = [...new Set(dto.itemIndexes)];
+    const unavailableRows =
+      dto.unavailableItems?.length
+        ? dto.unavailableItems
+        : (dto.itemIndexes ?? []).map((itemIndex) => ({ itemIndex, quantity: undefined }));
 
-    if (!uniqueIndexes.length) {
+    if (!unavailableRows.length) {
       throw new BadRequestException('Kamida bitta tovar tanlang');
     }
 
-    for (const itemIndex of uniqueIndexes) {
-      if (itemIndex < 0 || itemIndex >= request.items.length) {
+    const seenIndexes = new Set<number>();
+
+    for (const row of unavailableRows) {
+      if (
+        row.itemIndex < 0 ||
+        row.itemIndex >= request.items.length ||
+        seenIndexes.has(row.itemIndex)
+      ) {
         throw new BadRequestException('Tovar tanlovi noto‘g‘ri');
       }
 
-      const item = request.items[itemIndex];
+      const item = request.items[row.itemIndex];
 
       if (item.isPurchased) {
         throw new BadRequestException(
-          `${itemIndex + 1}-tovar allaqachon xarid qilingan`,
+          `${row.itemIndex + 1}-tovar allaqachon xarid qilingan`,
         );
       }
 
       if (item.isPurchaseUnavailable) {
         throw new BadRequestException(
-          `${itemIndex + 1}-tovar allaqachon xarid qilib bo‘lmaydi deb belgilangan`,
+          `${row.itemIndex + 1}-tovar allaqachon xarid qilib bo‘lmaydi deb belgilangan`,
         );
       }
+
+      const requestedQuantity = item.quantity;
+      const unavailableQuantity =
+        row.quantity != null && row.quantity >= 1
+          ? Math.round(row.quantity)
+          : requestedQuantity;
+
+      if (unavailableQuantity > requestedQuantity) {
+        throw new BadRequestException(
+          `${row.itemIndex + 1}-tovar uchun kiritilgan son so‘ralgan miqdordan ko‘p`,
+        );
+      }
+
+      seenIndexes.add(row.itemIndex);
     }
 
     const actor = await this.usersService.findByIdOrFail(userId);
     const now = new Date();
     const batchId = randomUUID();
+    const markedIndexes: number[] = [];
+    const remainingItemsToInsert: Array<{
+      afterIndex: number;
+      item: {
+        name: string;
+        characteristics: string;
+        quantity: number;
+        unit: string;
+        manufacturingCountry: string;
+        isPurchased: boolean;
+        isPurchaseUnavailable: boolean;
+      };
+    }> = [];
 
-    for (const itemIndex of uniqueIndexes) {
-      const item = request.items[itemIndex];
+    for (const row of unavailableRows) {
+      const item = request.items[row.itemIndex];
+      const originalSnapshot = {
+        name: item.name.trim(),
+        characteristics: item.characteristics.trim(),
+        quantity: item.quantity,
+        unit: item.unit?.trim() ?? '',
+      };
+      const unavailableQuantity =
+        row.quantity != null && row.quantity >= 1
+          ? Math.round(row.quantity)
+          : originalSnapshot.quantity;
+
+      if (unavailableQuantity < originalSnapshot.quantity) {
+        remainingItemsToInsert.push({
+          afterIndex: row.itemIndex,
+          item: {
+            name: originalSnapshot.name,
+            characteristics: originalSnapshot.characteristics,
+            quantity: originalSnapshot.quantity - unavailableQuantity,
+            unit: originalSnapshot.unit,
+            manufacturingCountry: item.manufacturingCountry?.trim() ?? '',
+            isPurchased: false,
+            isPurchaseUnavailable: false,
+          },
+        });
+        item.quantity = unavailableQuantity;
+      }
+
       item.isPurchaseUnavailable = true;
       item.purchaseUnavailableReason = comment;
       item.purchaseUnavailableAt = now;
       item.purchaseUnavailableBatchId = batchId;
+      markedIndexes.push(row.itemIndex);
     }
+
+    remainingItemsToInsert
+      .sort((left, right) => right.afterIndex - left.afterIndex)
+      .forEach(({ afterIndex, item: remainingItem }) => {
+        request.items.splice(afterIndex + 1, 0, remainingItem);
+      });
 
     request.markModified('items');
 
     const unavailableBatch: PurchaseUnavailableBatchEmbeddable = {
       batchId,
       comment,
-      itemIndexes: uniqueIndexes,
+      itemIndexes: markedIndexes,
       markedById: new Types.ObjectId(userId),
       markedByDisplayName: actor.displayName || actor.login,
       markedByLogin: actor.login,
@@ -2317,7 +2471,7 @@ export class PurchaseRequestsService implements OnModuleInit {
       actorDisplayName: actor.displayName || actor.login,
       actorLogin: actor.login,
       comment,
-      unavailableItemIndexes: uniqueIndexes,
+      unavailableItemIndexes: markedIndexes,
       createdAt: now,
     });
 
@@ -2580,6 +2734,129 @@ export class PurchaseRequestsService implements OnModuleInit {
       deleteAllowed,
       updateAllowed,
     });
+  }
+
+  async updateWithDocuments(
+    id: string,
+    dto: UpdatePurchaseRequestDto,
+    userId: string,
+    role: UserRole | undefined,
+    files: {
+      bildirgi?: Express.Multer.File;
+      kelishuv?: Express.Multer.File;
+    },
+  ) {
+    if (!files?.bildirgi?.buffer?.length || !files?.kelishuv?.buffer?.length) {
+      throw new BadRequestException(
+        'Bildirgi va kelishuv Word fayllari yuborilishi shart',
+      );
+    }
+
+    this.assertSubmittedDocxUpload(files.bildirgi);
+    this.assertSubmittedDocxUpload(files.kelishuv);
+
+    await this.update(id, dto, userId, role);
+
+    const request = await this.findByIdOrFail(id, userId, role);
+
+    const submittedDocuments =
+      await this.sessionDocumentsService.saveSubmittedDocumentsToRequest(
+        id,
+        request.requestCode,
+        {
+          bildirgi: files.bildirgi.buffer,
+          kelishuv: files.kelishuv.buffer,
+        },
+      );
+
+    request.submittedBildirgi = submittedDocuments.bildirgi;
+    request.submittedKelishuv = submittedDocuments.kelishuv;
+    await request.save();
+
+    this.emitPurchaseRequestChanged(request, 'updated');
+
+    const [deleteAllowed, updateAllowed] = await Promise.all([
+      this.hasPurchaseRequestDeletePermission(userId, role),
+      this.hasPurchaseRequestUpdatePermission(userId, role),
+    ]);
+
+    return this.toPublic(request, userId, undefined, role, {
+      deleteAllowed,
+      updateAllowed,
+    });
+  }
+
+  async createEditSession(userId: string, requestId: string, role?: UserRole) {
+    await this.assertPurchaseRequestUpdatePermission(userId, role);
+
+    const request = await this.findByIdOrFail(requestId, userId, role);
+
+    if (!this.isApplicant(request, userId)) {
+      throw new ForbiddenException('Faqat ariza beruvchi tahrirlashi mumkin');
+    }
+
+    if (request.status !== PurchaseRequestStatus.COMMISSION_REVIEW) {
+      throw new BadRequestException(
+        'Arizani faqat «Komissiya tekshiruvida» holatida tahrirlash mumkin',
+      );
+    }
+
+    if (!request.submittedBildirgi || !request.submittedKelishuv) {
+      throw new BadRequestException(
+        'Yuborilgan Word hujjatlari topilmadi — avval hujjatlarni yuklab oling',
+      );
+    }
+
+    const userObjectId = new Types.ObjectId(userId);
+    const total = await this.purchaseRequestSessionModel
+      .countDocuments({ userId: userObjectId })
+      .exec();
+
+    if (total >= MAX_ACTIVE_SESSIONS_PER_USER) {
+      throw new BadRequestException(
+        `Ko‘pi bilan ${MAX_ACTIVE_SESSIONS_PER_USER} ta faol seans bo‘lishi mumkin`,
+      );
+    }
+
+    const session = await this.purchaseRequestSessionModel.create({
+      userId: userObjectId,
+      editingRequestId: new Types.ObjectId(requestId),
+      title: `Tahrir: ${request.requestCode}`,
+      commissionMemberIds: request.commissionMembers.map((member) => member.userId),
+      bossId: request.boss.userId,
+      items: request.items.map((item) => ({
+        name: item.name,
+        characteristics: item.characteristics,
+        quantity: item.quantity,
+        unit: item.unit ?? '',
+        manufacturingCountry: item.manufacturingCountry ?? '',
+      })),
+      comment: request.comment ?? '',
+      commissionAgreementText: request.commissionAgreementText ?? '',
+      purchasePeriodType: request.purchasePeriodType,
+      purchasePeriodYear: request.purchasePeriodYear,
+      purchasePeriodQuarter: request.purchasePeriodQuarter,
+      purchasePeriodMonth: request.purchasePeriodMonth,
+      documentToken: this.sessionDocumentsService.createDocumentToken(),
+      applicantVerificationToken:
+        request.applicantVerificationToken ??
+        this.sessionDocumentsService.createApplicantVerificationToken(),
+    });
+
+    await this.sessionDocumentsService.copyRequestDocumentsToSession(
+      requestId,
+      session.id,
+    );
+
+    const version = Date.now();
+    session.documentsPreparedAt = new Date();
+    session.documentVersions = {
+      bildirgi: version,
+      kelishuv: version,
+    };
+    await session.save();
+
+    return this.toSessionPublic(session, total + 1);
   }
 
   async submitDecision(
@@ -2935,6 +3212,44 @@ export class PurchaseRequestsService implements OnModuleInit {
     return dto;
   }
 
+  normalizeUpdatePayload(body: Record<string, unknown>): UpdatePurchaseRequestDto {
+    const sessionDto = this.normalizeSessionPayload(body);
+
+    if (!sessionDto.bossId) {
+      throw new BadRequestException('Boshliqni tanlang');
+    }
+
+    if (!sessionDto.commissionMemberIds?.length) {
+      throw new BadRequestException('Kamida bitta komissiya a’zosini tanlang');
+    }
+
+    if (!sessionDto.purchasePeriodType || !sessionDto.purchasePeriodYear) {
+      throw new BadRequestException('Sotib olish davrini tanlang');
+    }
+
+    const dto: UpdatePurchaseRequestDto = {
+      commissionMemberIds: sessionDto.commissionMemberIds,
+      bossId: sessionDto.bossId,
+      items: (sessionDto.items ?? []).map((item) => ({
+        name: item.name?.trim() || '—',
+        characteristics: item.characteristics?.trim() || '—',
+        quantity: item.quantity ?? 1,
+        unit: item.unit?.trim() || '—',
+        manufacturingCountry: item.manufacturingCountry?.trim() || '—',
+      })),
+      comment: sessionDto.comment ?? '',
+      commissionAgreementText: sessionDto.commissionAgreementText ?? '',
+      purchasePeriodType: sessionDto.purchasePeriodType,
+      purchasePeriodYear: sessionDto.purchasePeriodYear,
+      purchasePeriodQuarter: sessionDto.purchasePeriodQuarter,
+      purchasePeriodMonth: sessionDto.purchasePeriodMonth,
+    };
+
+    validatePurchasePeriod(dto);
+
+    return dto;
+  }
+
   async saveActiveSession(
     userId: string,
     sessionId: string,
@@ -3083,12 +3398,25 @@ export class PurchaseRequestsService implements OnModuleInit {
         this.sessionDocumentsService.createApplicantVerificationToken();
     }
 
-    await this.sessionDocumentsService.prepareSessionDocuments(
-      session,
-      userId,
-      sessionId,
-      session.applicantVerificationToken,
-    );
+    const hasExistingEditDocuments =
+      Boolean(session.editingRequestId) &&
+      (await this.sessionDocumentsService.getDocumentUpdatedAt(
+        sessionId,
+        'bildirgi',
+      )) > 0 &&
+      (await this.sessionDocumentsService.getDocumentUpdatedAt(
+        sessionId,
+        'kelishuv',
+      )) > 0;
+
+    if (!hasExistingEditDocuments) {
+      await this.sessionDocumentsService.prepareSessionDocuments(
+        session,
+        userId,
+        sessionId,
+        session.applicantVerificationToken,
+      );
+    }
 
     const version = Date.now();
     session.documentsPreparedAt = new Date();

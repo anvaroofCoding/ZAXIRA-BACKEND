@@ -88,12 +88,6 @@ export class DashboardService {
     return d;
   }
 
-  private startOfUtcDay(date: Date) {
-    return new Date(
-      Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()),
-    );
-  }
-
   private addDays(from: Date, days: number) {
     const d = new Date(from);
     d.setUTCDate(d.getUTCDate() + days);

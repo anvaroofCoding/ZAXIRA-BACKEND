@@ -299,4 +299,26 @@ export class PurchaseRequestSessionDocumentsService {
     const safeName = path.basename(storedName);
     return path.join(this.getRequestDocumentsDir(requestId), safeName);
   }
+
+  async copyRequestDocumentsToSession(requestId: string, sessionId: string) {
+    const dir = this.getSessionDir(sessionId);
+    await mkdir(dir, { recursive: true });
+
+    for (const docType of ['bildirgi', 'kelishuv'] as const) {
+      const sourcePath = this.resolveRequestDocumentPath(
+        requestId,
+        `${docType}.docx`,
+      );
+      const targetPath = this.resolveDocumentPath(sessionId, docType);
+
+      try {
+        const buffer = await readFile(sourcePath);
+        await writeFile(targetPath, buffer);
+      } catch {
+        throw new NotFoundException(
+          `${docType === 'bildirgi' ? 'Bildirgi' : 'Kelishuv'} hujjati topilmadi`,
+        );
+      }
+    }
+  }
 }
