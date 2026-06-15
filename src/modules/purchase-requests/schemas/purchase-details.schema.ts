@@ -1,0 +1,153 @@
+import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
+import { Types } from 'mongoose';
+import {
+  ItemSubstitutionEmbeddable,
+  ItemSubstitutionSchema,
+} from './item-substitution.schema';
+
+@Schema({ _id: false })
+export class PurchaseLinkEmbeddable {
+  @Prop({ trim: true, default: '' })
+  label!: string;
+
+  @Prop({ required: true, trim: true })
+  url!: string;
+}
+
+export const PurchaseLinkSchema = SchemaFactory.createForClass(
+  PurchaseLinkEmbeddable,
+);
+
+@Schema({ _id: false })
+export class PurchaseFileEmbeddable {
+  @Prop({ required: true, trim: true })
+  label!: string;
+
+  @Prop({ required: true, trim: true })
+  storedName!: string;
+
+  @Prop({ required: true, trim: true })
+  originalName!: string;
+
+  @Prop({ required: true, trim: true })
+  mimeType!: string;
+
+  @Prop({ required: true, min: 0 })
+  size!: number;
+}
+
+export const PurchaseFileSchema = SchemaFactory.createForClass(
+  PurchaseFileEmbeddable,
+);
+
+@Schema({ _id: false })
+export class PurchaseItemAmountEmbeddable {
+  @Prop({ required: true, min: 0 })
+  itemIndex!: number;
+
+  @Prop({ required: true, min: 1 })
+  amount!: number;
+}
+
+export const PurchaseItemAmountSchema = SchemaFactory.createForClass(
+  PurchaseItemAmountEmbeddable,
+);
+
+@Schema({ _id: false })
+export class PurchaseDetailsEmbeddable {
+  @Prop({ trim: true, default: '' })
+  vendorName!: string;
+
+  @Prop({ type: [PurchaseLinkSchema], default: [] })
+  links!: PurchaseLinkEmbeddable[];
+
+  @Prop({ type: [PurchaseFileSchema], default: [] })
+  files!: PurchaseFileEmbeddable[];
+
+  @Prop({ trim: true, default: '' })
+  comment!: string;
+
+  @Prop({ type: [PurchaseItemAmountSchema], required: true })
+  itemAmounts!: PurchaseItemAmountEmbeddable[];
+
+  @Prop({ type: Types.ObjectId, required: true })
+  purchasedById!: Types.ObjectId;
+
+  @Prop({ required: true, trim: true })
+  purchasedByDisplayName!: string;
+
+  @Prop({ required: true, trim: true })
+  purchasedByLogin!: string;
+
+  @Prop({ required: true })
+  purchasedAt!: Date;
+}
+
+export const PurchaseDetailsSchema = SchemaFactory.createForClass(
+  PurchaseDetailsEmbeddable,
+);
+
+@Schema({ _id: false })
+export class PurchaseBatchEmbeddable {
+  @Prop({ required: true, trim: true })
+  batchId!: string;
+
+  @Prop({ trim: true, default: '' })
+  comment!: string;
+
+  @Prop({ type: [PurchaseLinkSchema], default: [] })
+  links!: PurchaseLinkEmbeddable[];
+
+  @Prop({ type: [PurchaseFileSchema], default: [] })
+  files!: PurchaseFileEmbeddable[];
+
+  @Prop({ type: [PurchaseItemAmountSchema], required: true })
+  itemAmounts!: PurchaseItemAmountEmbeddable[];
+
+  @Prop({ type: [ItemSubstitutionSchema], default: [] })
+  itemSubstitutions!: ItemSubstitutionEmbeddable[];
+
+  @Prop({ type: Types.ObjectId, required: true })
+  purchasedById!: Types.ObjectId;
+
+  @Prop({ required: true, trim: true })
+  purchasedByDisplayName!: string;
+
+  @Prop({ required: true, trim: true })
+  purchasedByLogin!: string;
+
+  @Prop({ required: true })
+  purchasedAt!: Date;
+}
+
+export const PurchaseBatchSchema = SchemaFactory.createForClass(
+  PurchaseBatchEmbeddable,
+);
+
+@Schema({ _id: false })
+export class PurchaseUnavailableBatchEmbeddable {
+  @Prop({ required: true, trim: true })
+  batchId!: string;
+
+  @Prop({ required: true, trim: true })
+  comment!: string;
+
+  @Prop({ type: [Number], required: true })
+  itemIndexes!: number[];
+
+  @Prop({ type: Types.ObjectId, required: true })
+  markedById!: Types.ObjectId;
+
+  @Prop({ required: true, trim: true })
+  markedByDisplayName!: string;
+
+  @Prop({ required: true, trim: true })
+  markedByLogin!: string;
+
+  @Prop({ required: true })
+  markedAt!: Date;
+}
+
+export const PurchaseUnavailableBatchSchema = SchemaFactory.createForClass(
+  PurchaseUnavailableBatchEmbeddable,
+);
