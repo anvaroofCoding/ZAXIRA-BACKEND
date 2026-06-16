@@ -11,6 +11,7 @@ import {
   IsString,
   Max,
   Min,
+  ValidateIf,
   ValidateNested,
 } from 'class-validator';
 import { PurchasePeriodType } from '../enums/purchase-period-type.enum';
@@ -49,14 +50,16 @@ export class CreatePurchaseRequestDto {
   @IsBoolean()
   purchaseDeadlineMandatory?: boolean;
 
+  @IsOptional()
   @IsEnum(PurchasePeriodType)
-  purchasePeriodType!: PurchasePeriodType;
+  purchasePeriodType?: PurchasePeriodType;
 
+  @ValidateIf((dto) => dto.purchasePeriodType !== PurchasePeriodType.PLAIN)
   @Type(() => Number)
   @IsInt()
   @Min(2000)
   @Max(2100)
-  purchasePeriodYear!: number;
+  purchasePeriodYear?: number;
 
   @IsOptional()
   @Type(() => Number)

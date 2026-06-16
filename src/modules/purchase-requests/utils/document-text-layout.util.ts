@@ -3,6 +3,28 @@ export const AGREEMENT_TITLE_LINES = [
   'muvofiqligi va zarurligi to\'g\'risida"gi',
 ] as const;
 
+/** Kelishuv varaqasidagi 1–2 band matnini hujjat paragraflariga ajratadi */
+export function parseAgreementParagraphs(text?: string | null): string[] {
+  const raw = (text ?? '').trim();
+  if (!raw) return [];
+
+  const byBlankLine = raw
+    .split(/\r?\n\s*\r?\n+/)
+    .map((block) => block.trim())
+    .filter(Boolean);
+
+  if (byBlankLine.length > 1) {
+    return byBlankLine;
+  }
+
+  const byLine = raw
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  return byLine.length ? byLine : [raw];
+}
+
 export const STRUCTURE_TITLE_SUFFIX = "xizmati boshlig'i";
 
 /** A4 hujjatdagi buyurtmachi/tuzilma matni uchun maksimal kenglik (pt). */

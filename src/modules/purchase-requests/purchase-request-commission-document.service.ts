@@ -12,6 +12,7 @@ import {
   buildBuyerTitleLines,
   DOCUMENT_BUYER_TEXT_MAX_WIDTH_PT,
   estimateTextWidth,
+  parseAgreementParagraphs,
 } from './utils/document-text-layout.util';
 import { resolveBossDocumentName } from './utils/resolve-boss-document-name.util';
 
@@ -72,7 +73,7 @@ export class PurchaseRequestCommissionDocumentService {
     const year = confirmedAt?.getFullYear() ?? new Date().getFullYear();
 
     if (!confirmedAt) {
-      return `${year}-yil "_____"____________`;
+      return `${year}-yil "____" __________`;
     }
 
     const day = String(confirmedAt.getDate()).padStart(2, '0');
@@ -96,20 +97,40 @@ export class PurchaseRequestCommissionDocumentService {
     decidedAt?: Date;
   }) {
     if (!decision?.decidedAt) {
-      return { signLabel: '', signedAt: '', hasSignTicket: false };
+      return {
+        signLabel: '',
+        signedAt: '',
+        hasSignTicket: false,
+        ticketCount: 0,
+      };
     }
 
     const signedAt = this.formatMemberSignDate(decision.decidedAt);
 
     if (decision.decision === ApprovalDecision.APPROVED) {
-      return { signLabel: 'Tasdiqlagan', signedAt, hasSignTicket: true };
+      return {
+        signLabel: 'Kelishgan',
+        signedAt,
+        hasSignTicket: true,
+        ticketCount: 2,
+      };
     }
 
     if (decision.decision === ApprovalDecision.PARTIAL) {
-      return { signLabel: 'Qisman tasdiqlagan', signedAt, hasSignTicket: true };
+      return {
+        signLabel: 'Qisman kelishgan',
+        signedAt,
+        hasSignTicket: true,
+        ticketCount: 1,
+      };
     }
 
-    return { signLabel: '', signedAt: '', hasSignTicket: false };
+    return {
+      signLabel: '',
+      signedAt: '',
+      hasSignTicket: false,
+      ticketCount: 0,
+    };
   }
 
   private placeTextFlushRight(
@@ -178,13 +199,13 @@ export class PurchaseRequestCommissionDocumentService {
         signLabel: signMeta.signLabel,
         signedAt: signMeta.signedAt,
         hasSignTicket: signMeta.hasSignTicket,
+        ticketCount: signMeta.ticketCount,
       };
     });
 
-    const agreementParagraphs = (request.commissionAgreementText ?? '')
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter(Boolean);
+    const agreementParagraphs = parseAgreementParagraphs(
+      request.commissionAgreementText,
+    );
 
     return {
       organizationName,
@@ -288,24 +309,19 @@ export class PurchaseRequestCommissionDocumentService {
     cellY: number,
     cellWidth: number,
     cellHeight: number,
-    signLabel: string,
+    ticketCount: number,
     signedAt: string,
   ) {
-    doc.font('bold').fontSize(7);
-    const labelWidth = doc.widthOfString(signLabel) + 12;
-    const ticketWidth = Math.min(cellWidth - 8, Math.max(78, labelWidth));
+    const ticketIcon = ticketCount >= 2 ? '✓ ✓' : ticketCount === 1 ? '✓' : '';
     const ticketHeight = 36;
-    const ticketX = cellX + (cellWidth - ticketWidth) / 2;
     const ticketY = cellY + (cellHeight - ticketHeight) / 2;
-
-    doc.lineWidth(0.75).rect(ticketX, ticketY, ticketWidth, ticketHeight).stroke();
 
     doc
       .font('bold')
-      .fontSize(7)
+      .fontSize(12)
       .fillColor('#000000')
-      .text(signLabel, ticketX, ticketY + 5, {
-        width: ticketWidth,
+      .text(ticketIcon, cellX, ticketY + 4, {
+        width: cellWidth,
         align: 'center',
         lineBreak: false,
       });
@@ -313,8 +329,9 @@ export class PurchaseRequestCommissionDocumentService {
     doc
       .font('regular')
       .fontSize(7.5)
-      .text(signedAt, ticketX, ticketY + 17, {
-        width: ticketWidth,
+      .fillColor('#000000')
+      .text(signedAt, cellX, ticketY + 20, {
+        width: cellWidth,
         align: 'center',
         lineBreak: false,
       });
@@ -329,6 +346,7 @@ export class PurchaseRequestCommissionDocumentService {
       signLabel: string;
       signedAt: string;
       hasSignTicket: boolean;
+      ticketCount: number;
     },
     colWidths: number[],
     y: number,
@@ -365,14 +383,14 @@ export class PurchaseRequestCommissionDocumentService {
       const width = colWidths[index] ?? 40;
       doc.lineWidth(0.75).rect(x, y, width, height).stroke();
 
-      if (index === 3 && member.hasSignTicket && member.signLabel && member.signedAt) {
+      if (index === 3 && member.hasSignTicket && member.ticketCount > 0) {
         this.drawApprovalTicket(
           doc,
           x,
           y,
           width,
           height,
-          member.signLabel,
+          member.ticketCount,
           member.signedAt,
         );
       } else {
@@ -437,11 +455,12 @@ export class PurchaseRequestCommissionDocumentService {
       this.placeTextFlushRight(doc, data.bossDateLine, y, 'regular', 10);
       y += 26;
 
+      doc.font('regular').fontSize(10);
       AGREEMENT_TITLE_LINES.forEach((line) => {
-        this.placeTextCentered(doc, line, y, pageWidth, 'bold', 10);
+        this.placeTextCentered(doc, line, y, pageWidth, 'regular', 10);
         y += 14;
       });
-      y += 4;
+      y += 8;
 
       doc
         .font('bold')
@@ -450,19 +469,32 @@ export class PurchaseRequestCommissionDocumentService {
           width: pageWidth,
           align: 'center',
         });
-      y = doc.y + 20;
+      y = doc.y + 18;
 
-      doc.font('regular').fontSize(10);
-      data.agreementParagraphs.forEach((paragraph) => {
-        doc.text(paragraph, doc.page.margins.left, y, {
-          width: pageWidth,
-          align: 'justify',
-          lineGap: 2,
+      if (data.agreementParagraphs.length) {
+        doc.font('regular').fontSize(10);
+        data.agreementParagraphs.forEach((paragraph) => {
+          const paragraphHeight = doc.heightOfString(paragraph, {
+            width: pageWidth,
+            align: 'justify',
+            lineGap: 2,
+          });
+
+          if (y + paragraphHeight > doc.page.height - doc.page.margins.bottom - 80) {
+            doc.addPage();
+            y = doc.page.margins.top;
+          }
+
+          doc.text(paragraph, doc.page.margins.left, y, {
+            width: pageWidth,
+            align: 'justify',
+            lineGap: 2,
+          });
+          y = doc.y + 10;
         });
-        y = doc.y + 12;
-      });
+        y += 10;
+      }
 
-      y += 32;
       const colWidths = this.buildTableColumnWidths(pageWidth);
       const rowAlignments: ('left' | 'center' | 'right')[] = [
         'center',
@@ -630,8 +662,10 @@ export class PurchaseRequestCommissionDocumentService {
         ],
       });
 
-    const makeSignDecisionCell = (signLabel: string, signedAt: string) =>
-      makeCell('', 3, {
+    const makeSignDecisionCell = (ticketCount: number, signedAt: string) => {
+      const ticketIcon = ticketCount >= 2 ? '✓ ✓' : ticketCount === 1 ? '✓' : '';
+
+      return makeCell('', 3, {
         alignment: AlignmentType.CENTER,
         children: [
           new Paragraph({
@@ -639,9 +673,10 @@ export class PurchaseRequestCommissionDocumentService {
             spacing: { after: 60, line: 276 },
             children: [
               new TextRun({
-                text: signLabel,
+                text: ticketIcon,
                 bold: true,
-                size: 20,
+                size: 24,
+                color: '000000',
               }),
             ],
           }),
@@ -652,6 +687,7 @@ export class PurchaseRequestCommissionDocumentService {
           }),
         ],
       });
+    };
 
     const tableHeader = new TableRow({
       tableHeader: true,
@@ -682,8 +718,8 @@ export class PurchaseRequestCommissionDocumentService {
             }),
             makeCell(member.name, 1),
             makeCell(member.position, 2),
-            member.hasSignTicket && member.signLabel && member.signedAt
-              ? makeSignDecisionCell(member.signLabel, member.signedAt)
+            member.hasSignTicket && member.ticketCount > 0 && member.signedAt
+              ? makeSignDecisionCell(member.ticketCount, member.signedAt)
               : makeCell('', 3, {
                   alignment: AlignmentType.CENTER,
                 }),
@@ -735,15 +771,14 @@ export class PurchaseRequestCommissionDocumentService {
                   children: [
                     new TextRun({
                       text: line,
-                      bold: true,
-                      size: 24,
+                      size: 22,
                     }),
                   ],
                 }),
             ),
             new Paragraph({
               alignment: AlignmentType.CENTER,
-              spacing: { after: 200 },
+              spacing: { after: 240, line: 276 },
               children: [
                 new TextRun({
                   text: 'KELIShUV VARAQASI',
@@ -752,26 +787,16 @@ export class PurchaseRequestCommissionDocumentService {
                 }),
               ],
             }),
-            ...data.agreementParagraphs.map((paragraph, index) =>
-              new Paragraph({
-                alignment: AlignmentType.JUSTIFIED,
-                spacing: {
-                  after:
-                    index === data.agreementParagraphs.length - 1 ? 400 : 140,
-                },
-                children: [new TextRun({ text: paragraph, size: 22 })],
-              }),
+            ...data.agreementParagraphs.map(
+              (paragraph) =>
+                new Paragraph({
+                  alignment: AlignmentType.JUSTIFIED,
+                  spacing: { after: 200, line: 276 },
+                  children: [new TextRun({ text: paragraph, size: 22 })],
+                }),
             ),
-            ...(data.agreementParagraphs.length
-              ? []
-              : [
-                  new Paragraph({
-                    spacing: { after: 400 },
-                    children: [],
-                  }),
-                ]),
             new Table({
-              width: { size: 100, type: WidthType.PERCENTAGE },
+              width: { size: DOCX_TABLE_WIDTH_DXA, type: WidthType.DXA },
               columnWidths: DOCX_TABLE_COLUMN_WIDTHS,
               layout: TableLayoutType.FIXED,
               borders: cellBorder,
@@ -798,7 +823,7 @@ export class PurchaseRequestCommissionDocumentService {
               tabStops: [
                 {
                   type: TabStopType.RIGHT,
-                  position: DOCX_CONTENT_WIDTH_DXA,
+                  position: 9360,
                 },
               ],
               spacing: { before: buyerTitleLines.length > 1 ? 60 : 120, line: 276 },

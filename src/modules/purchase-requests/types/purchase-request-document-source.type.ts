@@ -28,3 +28,8 @@ export interface GenerateDocxOptions {
   /** Ariza beruvchi imzosi o'rniga QR (faqat bildirgi) */
   applicantQrUrl?: string;
 }
+
+export interface GeneratePdfOptions {
+  /** Ariza beruvchi tasdiqlash QR (bildirgi) */
+  applicantQrUrl?: string;
+}

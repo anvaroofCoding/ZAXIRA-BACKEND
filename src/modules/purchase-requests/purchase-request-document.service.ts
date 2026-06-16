@@ -8,6 +8,7 @@ import { ApprovalDecision } from './enums/approval-decision.enum';
 import { PurchaseRequestDocument } from './schemas/purchase-request.schema';
 import {
   GenerateDocxOptions,
+  GeneratePdfOptions,
   PurchaseRequestDocumentSource,
 } from './types/purchase-request-document-source.type';
 import {
@@ -25,6 +26,22 @@ const FONT_BOLD_PATH = path.join(
   process.cwd(),
   'node_modules/dejavu-fonts-ttf/ttf/DejaVuSans-Bold.ttf',
 );
+
+/** A4 (11906 DXA) − chap/o‘ng margin 850×2 */
+const DOCX_CONTENT_WIDTH_DXA = 10206;
+const BILDIRGI_TABLE_COLUMN_WEIGHTS = [28, 118, 168, 48, 48, 62];
+const BILDIRGI_TABLE_COLUMN_WIDTHS = (() => {
+  const totalWeight = BILDIRGI_TABLE_COLUMN_WEIGHTS.reduce(
+    (sum, value) => sum + value,
+    0,
+  );
+  const widths = BILDIRGI_TABLE_COLUMN_WEIGHTS.map((weight) =>
+    Math.floor((weight / totalWeight) * DOCX_CONTENT_WIDTH_DXA),
+  );
+  const used = widths.reduce((sum, value) => sum + value, 0);
+  widths[widths.length - 1] += DOCX_CONTENT_WIDTH_DXA - used;
+  return widths;
+})();
 
 interface DocumentContext {
   organizationNameLatin: string;
@@ -190,14 +207,23 @@ export class PurchaseRequestDocumentService {
     return y + height;
   }
 
-  async generatePdf(request: PurchaseRequestDocumentSource): Promise<Buffer> {
+  async generatePdf(
+    request: PurchaseRequestDocumentSource,
+    options: GeneratePdfOptions = {},
+  ): Promise<Buffer> {
     const ctx: DocumentContext = {
       organizationNameLatin: this.getOrganizationNameLatin(),
       request,
     };
     const bossName = await resolveBossDocumentName(request.boss, this.usersService);
     const data = this.buildRows(ctx, bossName);
-    const qrBuffer = await this.buildBossQrBuffer(request);
+    const applicantQrBuffer = options.applicantQrUrl
+      ? await this.buildQrImageBuffer(options.applicantQrUrl)
+      : null;
+    const bossQrBuffer = await this.buildBossQrBuffer(request);
+    const qrBuffers = [applicantQrBuffer, bossQrBuffer].filter(
+      (buffer): buffer is Buffer => Boolean(buffer),
+    );
 
     return new Promise((resolve, reject) => {
       const doc = new PDFDocument({
@@ -223,7 +249,8 @@ export class PurchaseRequestDocumentService {
         'center',
         'left',
       ];
-      const qrSize = qrBuffer ? 72 : 0;
+      const qrSize = qrBuffers.length ? 72 : 0;
+      const qrRowWidth = qrBuffers.length > 1 ? qrSize * 2 + 12 : qrSize;
       const structureLineHeight = 14;
       const structureTextWidth = pageWidth * 0.72;
       const structureLines = buildBuyerTitleLines(
@@ -235,7 +262,9 @@ export class PurchaseRequestDocumentService {
         },
       );
       const footerReserve =
-        structureLines.length * structureLineHeight + (qrBuffer ? qrSize + 20 : 16) + 24;
+        structureLines.length * structureLineHeight +
+        (qrBuffers.length ? qrSize + 20 : 16) +
+        24;
 
       let y = doc.page.margins.top;
 
@@ -348,13 +377,19 @@ export class PurchaseRequestDocumentService {
         }
       });
 
-      if (qrBuffer) {
-        const qrX = doc.page.width - doc.page.margins.right - qrSize;
+      if (qrBuffers.length) {
         const qrY =
           structureBlockY +
           structureLines.length * structureLineHeight +
           10;
-        doc.image(qrBuffer, qrX, qrY, { fit: [qrSize, qrSize] });
+        const qrStartX =
+          doc.page.width - doc.page.margins.right - qrRowWidth;
+
+        qrBuffers.forEach((buffer, index) => {
+          doc.image(buffer, qrStartX + index * (qrSize + 12), qrY, {
+            fit: [qrSize, qrSize],
+          });
+        });
       }
 
       doc.end();
@@ -367,6 +402,7 @@ export class PurchaseRequestDocumentService {
   ): Promise<Buffer> {
     const docx = (await import('docx')) as Record<string, unknown>;
     const AlignmentType = docx.AlignmentType as Record<string, string>;
+    const BorderStyle = docx.BorderStyle as Record<string, string>;
     const Document = docx.Document as new (options: unknown) => unknown;
     const Packer = docx.Packer as {
       toBuffer: (file: unknown) => Promise<Buffer>;
@@ -379,6 +415,8 @@ export class PurchaseRequestDocumentService {
     const ImageRun = docx.ImageRun as new (options: unknown) => unknown;
     const WidthType = docx.WidthType as Record<string, string>;
     const TabStopType = docx.TabStopType as Record<string, string>;
+    const VerticalAlign = docx.VerticalAlign as Record<string, string>;
+    const TableLayoutType = docx.TableLayoutType as Record<string, string>;
 
     const ctx: DocumentContext = {
       organizationNameLatin: this.getOrganizationNameLatin(),
@@ -386,63 +424,108 @@ export class PurchaseRequestDocumentService {
     };
     const bossName = await resolveBossDocumentName(request.boss, this.usersService);
     const data = this.buildRows(ctx, bossName);
-    const qrBuffer = options.applicantQrUrl
+    const applicantQrBuffer = options.applicantQrUrl
       ? await this.buildQrImageBuffer(options.applicantQrUrl)
-      : await this.buildBossQrBuffer(request);
+      : null;
+    const bossQrBuffer = await this.buildBossQrBuffer(request);
+    const qrImages = [applicantQrBuffer, bossQrBuffer].filter(
+      (buffer): buffer is Buffer => Boolean(buffer),
+    );
     const structureTitleLines = buildBuyerTitleLines(
       data.structureName,
       DOCUMENT_BUYER_TEXT_MAX_WIDTH_PT,
       estimateTextWidth,
     );
 
-    const tableHeader = new TableRow({
-      tableHeader: true,
-      children: [
-        'T/R',
-        'Mahsulot nomi',
-        'Xususiyat',
-        'Miqdor',
-        'Birlik',
-        'Davlat',
-      ].map(
-        (text) =>
-          new TableCell({
+    const cellBorder = {
+      top: { style: BorderStyle.SINGLE, size: 1, color: '000000' },
+      bottom: { style: BorderStyle.SINGLE, size: 1, color: '000000' },
+      left: { style: BorderStyle.SINGLE, size: 1, color: '000000' },
+      right: { style: BorderStyle.SINGLE, size: 1, color: '000000' },
+    };
+
+    const makeCell = (
+      text: string,
+      columnIndex: number,
+      options: { bold?: boolean; alignment?: string } = {},
+    ) =>
+      new TableCell({
+        width: {
+          size: BILDIRGI_TABLE_COLUMN_WIDTHS[columnIndex],
+          type: WidthType.DXA,
+        },
+        borders: cellBorder,
+        verticalAlign: VerticalAlign.CENTER,
+        children: [
+          new Paragraph({
+            alignment: options.alignment ?? AlignmentType.LEFT,
             children: [
-              new Paragraph({
-                children: [new TextRun({ text, bold: true, size: 20 })],
+              new TextRun({
+                text,
+                bold: options.bold ?? false,
+                size: 20,
               }),
             ],
           }),
+        ],
+      });
+
+    const headerColumns = [
+      { text: 'T/R', alignment: AlignmentType.CENTER },
+      { text: 'Mahsulot nomi', alignment: AlignmentType.LEFT },
+      { text: 'Xususiyat', alignment: AlignmentType.LEFT },
+      { text: 'Miqdor', alignment: AlignmentType.CENTER },
+      { text: 'Birlik', alignment: AlignmentType.CENTER },
+      { text: 'Davlat', alignment: AlignmentType.LEFT },
+    ];
+
+    const tableHeader = new TableRow({
+      tableHeader: true,
+      children: headerColumns.map((column, index) =>
+        makeCell(column.text, index, {
+          bold: true,
+          alignment: column.alignment,
+        }),
       ),
     });
 
-    const tableRows = data.items.map(
-      (item) =>
-        new TableRow({
-          children: [
-            String(item.index),
-            item.name,
-            item.characteristics,
-            String(item.quantity),
-            item.unit,
-            item.manufacturingCountry,
-          ].map(
-            (text) =>
-              new TableCell({
-                children: [
-                  new Paragraph({
-                    children: [new TextRun({ text, size: 20 })],
-                  }),
-                ],
-              }),
-          ),
-        }),
+    const rowAlignments = [
+      AlignmentType.CENTER,
+      AlignmentType.LEFT,
+      AlignmentType.LEFT,
+      AlignmentType.CENTER,
+      AlignmentType.CENTER,
+      AlignmentType.LEFT,
+    ];
+
+    const tableRows = data.items.map((item) =>
+      new TableRow({
+        children: [
+          String(item.index),
+          item.name,
+          item.characteristics,
+          String(item.quantity),
+          item.unit,
+          item.manufacturingCountry,
+        ].map((text, index) =>
+          makeCell(text, index, { alignment: rowAlignments[index] }),
+        ),
+      }),
     );
 
     const doc = new Document({
       sections: [
         {
-          properties: {},
+          properties: {
+            page: {
+              margin: {
+                top: 1134,
+                right: 850,
+                bottom: 1134,
+                left: 850,
+              },
+            },
+          },
           children: [
             new Paragraph({
               tabStops: [
@@ -469,7 +552,10 @@ export class PurchaseRequestDocumentService {
               children: [new TextRun({ text: data.comment, size: 22 })],
             }),
             new Table({
-              width: { size: 100, type: WidthType.PERCENTAGE },
+              width: { size: DOCX_CONTENT_WIDTH_DXA, type: WidthType.DXA },
+              columnWidths: BILDIRGI_TABLE_COLUMN_WIDTHS,
+              layout: TableLayoutType.FIXED,
+              borders: cellBorder,
               rows: [tableHeader, ...tableRows],
             }),
             ...structureTitleLines.slice(0, -1).map(
@@ -500,34 +586,22 @@ export class PurchaseRequestDocumentService {
                 }),
               ],
             }),
-            ...(qrBuffer
+            ...(qrImages.length
               ? [
                   new Paragraph({
                     spacing: { before: 120 },
-                    children: [
-                      new TextRun({
-                        text: options.applicantQrUrl
-                          ? 'QR kodni imzo o‘rniga kerakli joyga ko‘chiring:'
-                          : '',
-                        italics: true,
-                        size: 18,
-                        color: '666666',
-                      }),
-                    ],
-                  }),
-                  new Paragraph({
-                    spacing: { before: 80 },
                     alignment: AlignmentType.LEFT,
-                    children: [
-                      new ImageRun({
-                        type: 'png',
-                        data: qrBuffer,
-                        transformation: {
-                          width: 92,
-                          height: 92,
-                        },
-                      }),
-                    ],
+                    children: qrImages.map(
+                      (buffer) =>
+                        new ImageRun({
+                          type: 'png',
+                          data: buffer,
+                          transformation: {
+                            width: 92,
+                            height: 92,
+                          },
+                        }),
+                    ),
                   }),
                 ]
               : []),

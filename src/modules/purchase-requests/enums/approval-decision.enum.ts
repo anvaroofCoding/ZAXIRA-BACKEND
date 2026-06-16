@@ -5,7 +5,9 @@ export enum ApprovalDecision {
 }
 
 export const APPROVAL_DECISION_LABELS: Record<ApprovalDecision, string> = {
-  [ApprovalDecision.APPROVED]: 'Tasdiqlash',
-  [ApprovalDecision.PARTIAL]: 'Qisman tasdiqlash',
-  [ApprovalDecision.REJECTED]: 'Rad etish',
+  [ApprovalDecision.APPROVED]: 'Kelishildi',
+  [ApprovalDecision.PARTIAL]: 'Qisman kelishildi',
+  [ApprovalDecision.REJECTED]: 'Rad etildi',
 };
+
+export const MEMBER_DECISION_PENDING_LABEL = 'Kelishilmoqda';

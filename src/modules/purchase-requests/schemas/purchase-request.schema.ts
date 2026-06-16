@@ -117,7 +117,7 @@ export class PurchaseRequest {
   @Prop({ type: [HistoryStepSchema], default: [] })
   history!: HistoryStepEmbeddable[];
 
-  /** Ariza beruvchi qisman tasdiqdan keyin qayta yuborgan vaqti */
+  /** Ariza beruvchi atkazdan keyin qayta yuborgan vaqti */
   @Prop()
   resubmittedAfterPartialAt?: Date;
 

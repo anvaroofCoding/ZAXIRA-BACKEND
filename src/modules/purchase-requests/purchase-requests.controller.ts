@@ -247,6 +247,7 @@ export class PurchaseRequestsController {
       query,
       user.sub,
       user.role,
+      user.login,
     );
   }
 
@@ -279,11 +280,15 @@ export class PurchaseRequestsController {
     @Body() body: Record<string, unknown>,
     @CurrentUser() user: JwtPayload,
   ) {
-    const dto = this.purchaseRequestsService.normalizeSessionPayload(body);
+    const regenerateKelishuvOnly = body?.regenerateKelishuvOnly === true;
+    const { regenerateKelishuvOnly: _ignored, ...rest } = body ?? {};
+    const dto = this.purchaseRequestsService.normalizeSessionPayload(rest);
+
     return this.purchaseRequestsService.prepareSessionDocuments(
       user.sub,
       sessionId,
-      Object.keys(body ?? {}).length ? dto : undefined,
+      Object.keys(rest).length ? dto : undefined,
+      { regenerateKelishuvOnly },
     );
   }
 
@@ -564,6 +569,7 @@ export class PurchaseRequestsController {
       user.role,
       { purchasingView: isPurchasingView, historyView: isHistoryView },
       warehouseDispatch,
+      user.login,
     );
   }
 
@@ -742,6 +748,42 @@ export class PurchaseRequestsController {
     return this.purchaseRequestsService.resubmit(id, dto, user.sub, user.role);
   }
 
+  @Post(':id/resubmit-with-documents')
+  @UseInterceptors(
+    FileFieldsInterceptor(
+      [
+        { name: 'bildirgi', maxCount: 1 },
+        { name: 'kelishuv', maxCount: 1 },
+      ],
+      {
+        storage: memoryStorage(),
+        limits: { fileSize: 10 * 1024 * 1024 },
+      },
+    ),
+  )
+  resubmitWithDocuments(
+    @Param('id', ParseMongoIdPipe) id: string,
+    @UploadedFiles()
+    files: {
+      bildirgi?: Express.Multer.File[];
+      kelishuv?: Express.Multer.File[];
+    },
+    @Body('payload') payload: string | undefined,
+    @CurrentUser() user: JwtPayload,
+  ) {
+    const dto = this.parseResubmitPurchaseRequestPayload(payload);
+    return this.purchaseRequestsService.resubmitWithDocuments(
+      id,
+      dto,
+      user.sub,
+      user.role,
+      {
+        bildirgi: files?.bildirgi?.[0],
+        kelishuv: files?.kelishuv?.[0],
+      },
+    );
+  }
+
   @Post(':id/boss-confirm')
   confirmBossDecision(
     @Param('id', ParseMongoIdPipe) id: string,
@@ -753,6 +795,7 @@ export class PurchaseRequestsController {
       dto,
       user.sub,
       user.role,
+      user.login,
     );
   }
 
@@ -806,6 +849,25 @@ export class PurchaseRequestsController {
     try {
       const parsed = JSON.parse(payload) as Record<string, unknown>;
       return this.purchaseRequestsService.normalizeUpdatePayload(parsed);
+    } catch (error) {
+      if (error instanceof BadRequestException) {
+        throw error;
+      }
+
+      throw new BadRequestException('Ariza ma’lumotlari noto‘g‘ri formatda yuborildi');
+    }
+  }
+
+  private parseResubmitPurchaseRequestPayload(
+    payload: string | undefined,
+  ): ResubmitPurchaseRequestDto {
+    if (!payload?.trim()) {
+      throw new BadRequestException('Ariza ma’lumotlari yuborilmadi');
+    }
+
+    try {
+      const parsed = JSON.parse(payload) as Record<string, unknown>;
+      return this.purchaseRequestsService.normalizeResubmitPayload(parsed);
     } catch (error) {
       if (error instanceof BadRequestException) {
         throw error;

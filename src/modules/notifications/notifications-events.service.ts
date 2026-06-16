@@ -35,6 +35,25 @@ export class NotificationsEventsService {
     private readonly usersService: UsersService,
   ) {}
 
+  async notifyPurchaseRequestCommissionRejection(
+    request: PurchaseRequestDocument,
+  ) {
+    const requestId = String(request._id);
+    const code = request.requestCode;
+    const creatorId = String(request.createdById);
+
+    await this.notificationsService.createMany([
+      {
+        userId: creatorId,
+        type: NotificationType.PURCHASE_REQUEST_STATUS,
+        title: 'Arizada tuzatish kerak',
+          message: `${code} raqamli arizada rad etildi — tuzatib qayta yuboring`,
+        linkPath: SUBMIT_PATH,
+        entityId: requestId,
+      },
+    ]);
+  }
+
   async handlePurchaseRequestChanged(
     request: PurchaseRequestDocument,
     event: 'created' | 'updated',
@@ -53,7 +72,7 @@ export class NotificationsEventsService {
           userId: memberId,
           type: NotificationType.PURCHASE_REQUEST_APPROVAL,
           title: 'Yangi ariza',
-          message: `${code} raqamli ariza tasdiqlash uchun kelib tushdi`,
+          message: `${code} raqamli ariza kelishish uchun kelib tushdi`,
           linkPath: APPROVAL_PATH,
           entityId: requestId,
         });
@@ -91,7 +110,7 @@ export class NotificationsEventsService {
             userId: String(request.boss.userId),
             type: NotificationType.PURCHASE_REQUEST_APPROVAL,
             title: 'Boshliq qarori kerak',
-            message: `${code} raqamli ariza boshliq tasdig‘ini kutmoqda`,
+            message: `${code} raqamli ariza boshliq kelishmoqda`,
             linkPath: APPROVAL_PATH,
             entityId: requestId,
           });
@@ -107,11 +126,11 @@ export class NotificationsEventsService {
           title:
             request.status === PurchaseRequestStatus.REJECTED
               ? 'Ariza rad etildi'
-              : 'Ariza qayta ishlash kerak',
+              : 'Arizada tuzatish kerak',
           message:
             request.status === PurchaseRequestStatus.REJECTED
               ? `${code} raqamli ariza rad etildi`
-              : `${code} raqamli arizada tuzatish talab qilindi`,
+              : `${code} raqamli arizada rad etildi — tuzatib qayta yuboring`,
           linkPath: SUBMIT_PATH,
           entityId: requestId,
         });

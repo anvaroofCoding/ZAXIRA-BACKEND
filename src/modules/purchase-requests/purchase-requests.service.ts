@@ -47,6 +47,7 @@ import { SubmitApprovalDecisionDto } from './dto/submit-approval-decision.dto';
 import {
   APPROVAL_DECISION_LABELS,
   ApprovalDecision,
+  MEMBER_DECISION_PENDING_LABEL,
 } from './enums/approval-decision.enum';
 import {
   PURCHASE_REQUEST_STATUS_LABELS,
@@ -86,6 +87,8 @@ import {
 import {
   formatPurchasePeriodLabel,
   normalizePurchasePeriodFields,
+  parsePurchasePeriodType,
+  resolvePurchasePeriodType,
   validatePurchasePeriod,
 } from './utils/purchase-period.util';
 import { PurchasePeriodType } from './enums/purchase-period-type.enum';
@@ -313,6 +316,71 @@ export class PurchaseRequestsService implements OnModuleInit {
     void this.notificationsEvents.handlePurchaseRequestChanged(request, event);
   }
 
+  private async isRequestCodeTaken(requestCode: string) {
+    const normalized = requestCode.trim().toUpperCase();
+    if (!normalized) return false;
+
+    const existing = await this.purchaseRequestModel
+      .exists({ requestCode: normalized })
+      .exec();
+
+    return Boolean(existing);
+  }
+
+  private async allocateUniqueRequestCode(
+    structureShortName?: string | null,
+    structureId?: string | null,
+    maxAttempts = 8,
+  ) {
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      const requestCode = await this.nextRequestCode(
+        structureShortName,
+        structureId,
+      );
+
+      if (!(await this.isRequestCodeTaken(requestCode))) {
+        return requestCode;
+      }
+    }
+
+    throw new ConflictException(
+      'Ariza raqamini ajratib bo‘lmadi. Qayta urinib ko‘ring',
+    );
+  }
+
+  private async findRequestCreatedFromSession(
+    session: PurchaseRequestSessionDocument,
+    userId: string,
+    requestCode: string,
+  ) {
+    if (session.applicantVerificationToken) {
+      const byToken = await this.purchaseRequestModel
+        .findOne({
+          applicantVerificationToken: session.applicantVerificationToken,
+        })
+        .exec();
+
+      if (byToken) {
+        return byToken;
+      }
+    }
+
+    const normalizedCode = requestCode.trim().toUpperCase();
+    if (!normalizedCode) {
+      return null;
+    }
+
+    const byCode = await this.purchaseRequestModel
+      .findOne({ requestCode: normalizedCode })
+      .exec();
+
+    if (byCode && String(byCode.createdById) === userId) {
+      return byCode;
+    }
+
+    return null;
+  }
+
   private async nextRequestCode(
     structureShortName?: string | null,
     structureId?: string | null,
@@ -412,20 +480,51 @@ export class PurchaseRequestsService implements OnModuleInit {
     return true;
   }
 
-  /** Qayta yuborishda faqat to‘liq «Tasdiqlash» berganlar qarorini saqlaydi. */
+  /** Qayta yuborishda to‘liq kelishgan (yoki qisman kelishgan) a’zolar qarorini saqlaydi. */
   private preserveMemberDecisionsAfterResubmit(
     request: PurchaseRequestDocument,
+    resubmitToMemberIds: string[],
   ): MemberDecisionEmbeddable[] {
     const existing = request.memberDecisions ?? [];
+    const resetIds = new Set(resubmitToMemberIds.map(String));
 
     return request.commissionMembers.map((member) => {
+      const memberId = String(member.userId);
       const prior = existing.find(
-        (decision) => String(decision.userId) === String(member.userId),
+        (decision) => String(decision.userId) === memberId,
       );
 
-      if (prior?.decision === ApprovalDecision.APPROVED) {
+      if (
+        prior?.decision === ApprovalDecision.APPROVED ||
+        prior?.decision === ApprovalDecision.PARTIAL
+      ) {
         return {
           userId: member.userId,
+          displayName: prior.displayName || member.displayName,
+          login: prior.login || member.login,
+          structureShortName:
+            prior.structureShortName ?? member.structureShortName,
+          position: prior.position ?? member.position,
+          decision: prior.decision,
+          comment: prior.comment ?? '',
+          decidedAt: prior.decidedAt,
+        };
+      }
+
+      if (prior?.decision === ApprovalDecision.REJECTED && resetIds.has(memberId)) {
+        return {
+          userId: member.userId,
+          displayName: member.displayName,
+          login: member.login,
+          structureShortName: member.structureShortName,
+          position: member.position,
+          comment: '',
+        };
+      }
+
+      if (prior) {
+        return {
+          userId: prior.userId,
           displayName: prior.displayName || member.displayName,
           login: prior.login || member.login,
           structureShortName:
@@ -446,6 +545,171 @@ export class PurchaseRequestsService implements OnModuleInit {
         comment: '',
       };
     });
+  }
+
+  private normalizeUserId(userId: unknown): string {
+    if (userId == null || userId === '') {
+      return '';
+    }
+
+    if (userId instanceof Types.ObjectId) {
+      return userId.toHexString();
+    }
+
+    if (typeof userId === 'object' && userId !== null && '_id' in userId) {
+      return this.normalizeUserId((userId as { _id: unknown })._id);
+    }
+
+    const raw = String(userId).trim();
+
+    if (Types.ObjectId.isValid(raw)) {
+      return new Types.ObjectId(raw).toHexString();
+    }
+
+    return raw;
+  }
+
+  private isMemberAgreed(decision?: ApprovalDecision | string | null) {
+    if (!decision) {
+      return false;
+    }
+
+    const normalized = String(decision).toUpperCase();
+
+    return (
+      normalized === ApprovalDecision.APPROVED ||
+      normalized === ApprovalDecision.PARTIAL
+    );
+  }
+
+  private syncMemberDecisionsWithCommission(
+    request: PurchaseRequestDocument,
+  ): void {
+    const members = request.commissionMembers ?? [];
+
+    if (!members.length) {
+      return;
+    }
+
+    const existingByUserId = new Map(
+      (request.memberDecisions ?? []).map((decision) => [
+        this.normalizeUserId(decision.userId),
+        decision,
+      ]),
+    );
+
+    request.memberDecisions = members.map((member) => {
+      const prior = existingByUserId.get(this.normalizeUserId(member.userId));
+
+      if (prior) {
+        return {
+          userId: member.userId,
+          displayName: prior.displayName || member.displayName,
+          login: prior.login || member.login,
+          structureShortName:
+            prior.structureShortName ?? member.structureShortName,
+          position: prior.position ?? member.position,
+          decision: prior.decision,
+          comment: prior.comment ?? '',
+          decidedAt: prior.decidedAt,
+        };
+      }
+
+      return {
+        userId: member.userId,
+        displayName: member.displayName,
+        login: member.login,
+        structureShortName: member.structureShortName,
+        position: member.position?.trim() ?? '',
+        comment: '',
+      };
+    });
+  }
+
+  private getWorkflowStatus(
+    request: PurchaseRequestDocument,
+  ): PurchaseRequestStatus {
+    this.syncMemberDecisionsWithCommission(request);
+    return this.recomputeStatus(request);
+  }
+
+  private getPublicStatus(request: PurchaseRequestDocument): PurchaseRequestStatus {
+    const workflowStatus = this.getWorkflowStatus(request);
+
+    if (workflowStatus === PurchaseRequestStatus.BOSS_DECISION_PENDING) {
+      return PurchaseRequestStatus.BOSS_DECISION_PENDING;
+    }
+
+    if (
+      workflowStatus === PurchaseRequestStatus.PARTIAL_REVISION ||
+      request.status === PurchaseRequestStatus.PARTIAL_REVISION
+    ) {
+      return PurchaseRequestStatus.COMMISSION_REVIEW;
+    }
+
+    return workflowStatus;
+  }
+
+  private areAllCommissionMembersAgreed(request: PurchaseRequestDocument) {
+    this.syncMemberDecisionsWithCommission(request);
+
+    const decisions = request.memberDecisions ?? [];
+
+    if (!decisions.length) {
+      return false;
+    }
+
+    if (
+      decisions.some((vote) => vote.decision === ApprovalDecision.REJECTED)
+    ) {
+      return false;
+    }
+
+    const members = request.commissionMembers ?? [];
+
+    if (members.length > 0) {
+      const decisionByUserId = new Map(
+        decisions.map((vote) => [
+          this.normalizeUserId(vote.userId),
+          vote.decision,
+        ]),
+      );
+
+      return members.every((member) =>
+        this.isMemberAgreed(
+          decisionByUserId.get(this.normalizeUserId(member.userId)),
+        ),
+      );
+    }
+
+    return decisions.every((vote) => this.isMemberAgreed(vote.decision));
+  }
+
+  private async reconcileCommissionStatus(
+    request: PurchaseRequestDocument,
+  ): Promise<void> {
+    const lockedStatuses: PurchaseRequestStatus[] = [
+      PurchaseRequestStatus.REJECTED,
+      PurchaseRequestStatus.PURCHASING,
+      PurchaseRequestStatus.PURCHASED,
+      PurchaseRequestStatus.WAREHOUSE_IN_TRANSIT,
+      PurchaseRequestStatus.WAREHOUSE_COMPLETED,
+    ];
+
+    if (lockedStatuses.includes(request.status)) {
+      return;
+    }
+
+    this.syncMemberDecisionsWithCommission(request);
+    const next = this.recomputeStatus(request);
+
+    if (next === request.status) {
+      return;
+    }
+
+    request.status = next;
+    await request.save();
+    this.emitPurchaseRequestChanged(request, 'updated');
   }
 
   private buildSubmittedHistoryStep(
@@ -533,6 +797,7 @@ export class PurchaseRequestsService implements OnModuleInit {
       editingRequestId: session.editingRequestId
         ? String(session.editingRequestId)
         : null,
+      reservedRequestCode: session.reservedRequestCode ?? null,
       createdAt: session.createdAt ?? null,
       updatedAt: session.updatedAt ?? null,
     };
@@ -603,6 +868,8 @@ export class PurchaseRequestsService implements OnModuleInit {
       request.memberDecisions = this.buildMemberDecisions(
         request.commissionMembers ?? [],
       );
+    } else {
+      this.syncMemberDecisionsWithCommission(request);
     }
 
     if (!request.history?.length) {
@@ -635,51 +902,174 @@ export class PurchaseRequestsService implements OnModuleInit {
       return PurchaseRequestStatus.WAREHOUSE_COMPLETED;
     }
 
-    const votes = request.memberDecisions ?? [];
-
-    if (votes.some((vote) => vote.decision === ApprovalDecision.REJECTED)) {
-      return PurchaseRequestStatus.REJECTED;
-    }
-
-    const hasPartial = votes.some(
-      (vote) => vote.decision === ApprovalDecision.PARTIAL,
-    );
-
-    if (hasPartial && !request.resubmittedAfterPartialAt) {
-      return PurchaseRequestStatus.PARTIAL_REVISION;
-    }
-
-    const allVoted = votes.length > 0 && votes.every((vote) => vote.decision);
-
-    if (!allVoted) {
+    if (!this.areAllCommissionMembersAgreed(request)) {
       return PurchaseRequestStatus.COMMISSION_REVIEW;
     }
 
     return PurchaseRequestStatus.BOSS_DECISION_PENDING;
   }
 
-  private isCommissionReviewOpen(request: PurchaseRequestDocument) {
+  private hasAnyMemberAgreed(request: PurchaseRequestDocument) {
+    return (request.memberDecisions ?? []).some((vote) =>
+      this.isMemberAgreed(vote.decision),
+    );
+  }
+
+  private hasRejectedMemberDecisions(request: PurchaseRequestDocument) {
+    return (request.memberDecisions ?? []).some(
+      (vote) => vote.decision === ApprovalDecision.REJECTED,
+    );
+  }
+
+  /** Boshliq rad etgan, komissiya to‘liq kelishgan — faqat boshliqqa qayta yuborish */
+  private isBossRejectionPendingResubmit(request: PurchaseRequestDocument) {
+    return (
+      request.status === PurchaseRequestStatus.REJECTED &&
+      request.bossDecision === ApprovalDecision.REJECTED &&
+      this.areAllCommissionMembersAgreed(request)
+    );
+  }
+
+  private isCommissionResubmitPhase(request: PurchaseRequestDocument) {
     return (
       request.status === PurchaseRequestStatus.COMMISSION_REVIEW ||
-      (request.status === PurchaseRequestStatus.PARTIAL_REVISION &&
-        !request.resubmittedAfterPartialAt)
+      request.status === PurchaseRequestStatus.PARTIAL_REVISION
     );
+  }
+
+  private canOpenDocumentEditSession(request: PurchaseRequestDocument) {
+    if (request.status === PurchaseRequestStatus.COMMISSION_REVIEW) {
+      return true;
+    }
+
+    if (request.status === PurchaseRequestStatus.PARTIAL_REVISION) {
+      return true;
+    }
+
+    return this.isBossRejectionPendingResubmit(request);
+  }
+
+  private async applyResubmitFieldsToRequest(
+    request: PurchaseRequestDocument,
+    dto: ResubmitPurchaseRequestDto,
+  ) {
+    if (dto.commissionMemberIds.includes(dto.bossId)) {
+      throw new BadRequestException(
+        'Boshliq komissiya a’zolari ro‘yxatida bo‘lmasligi kerak',
+      );
+    }
+
+    validatePurchasePeriod(dto);
+    const purchasePeriod = normalizePurchasePeriodFields(dto);
+
+    request.commissionMembers = await this.buildUserSnapshots(
+      dto.commissionMemberIds,
+    );
+    const [boss] = await this.buildUserSnapshots([dto.bossId]);
+    request.boss = boss;
+    request.items = this.normalizeRequestItems(dto.items);
+    request.comment = dto.comment?.trim() ?? '';
+    if (dto.commissionAgreementText !== undefined) {
+      request.commissionAgreementText = dto.commissionAgreementText?.trim() ?? '';
+    }
+    request.purchasePeriodType = purchasePeriod.purchasePeriodType;
+    request.purchasePeriodYear = purchasePeriod.purchasePeriodYear;
+    request.purchasePeriodQuarter = purchasePeriod.purchasePeriodQuarter;
+    request.purchasePeriodMonth = purchasePeriod.purchasePeriodMonth;
+    request.markModified('items');
+  }
+
+  private async regenerateKelishuvAfterResubmitIfNeeded(
+    request: PurchaseRequestDocument,
+    options?: { skipWhenDocumentsProvided?: boolean },
+  ) {
+    if (options?.skipWhenDocumentsProvided || !request.submittedKelishuv) {
+      return;
+    }
+
+    try {
+      request.submittedKelishuv =
+        await this.sessionDocumentsService.regenerateRequestKelishuvDocument(
+          request,
+        );
+      await request.save();
+    } catch (error) {
+      this.logger.warn(
+        `Ariza ${request.id} kelishuv hujjatini yangilab bo‘lmadi`,
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+  }
+
+  /** Umumiy holatda atkaz alohida ko‘rsatilmaydi — kelishuv jarayonida qoladi. */
+  private getEffectivePublicStatus(
+    request: PurchaseRequestDocument,
+  ): PurchaseRequestStatus {
+    if (
+      request.status === PurchaseRequestStatus.PARTIAL_REVISION &&
+      this.isCommissionResubmitPhase(request)
+    ) {
+      return PurchaseRequestStatus.COMMISSION_REVIEW;
+    }
+
+    return request.status;
+  }
+
+  private isBossDecisionPhase(request: PurchaseRequestDocument) {
+    if (request.bossDecision) {
+      return false;
+    }
+
+    const lockedStatuses: PurchaseRequestStatus[] = [
+      PurchaseRequestStatus.REJECTED,
+      PurchaseRequestStatus.PURCHASING,
+      PurchaseRequestStatus.PURCHASED,
+      PurchaseRequestStatus.WAREHOUSE_IN_TRANSIT,
+      PurchaseRequestStatus.WAREHOUSE_COMPLETED,
+    ];
+
+    if (lockedStatuses.includes(request.status)) {
+      return false;
+    }
+
+    return this.areAllCommissionMembersAgreed(request);
+  }
+
+  private isCommissionReviewOpen(request: PurchaseRequestDocument) {
+    if (!this.isCommissionResubmitPhase(request)) {
+      return false;
+    }
+
+    return (request.memberDecisions ?? []).some((vote) => !vote.decision);
   }
 
   private isCommissionMember(request: PurchaseRequestDocument, userId: string) {
+    const normalized = this.normalizeUserId(userId);
+
     return request.commissionMembers.some(
-      (member) => String(member.userId) === userId,
+      (member) => this.normalizeUserId(member.userId) === normalized,
     );
   }
 
-  private isBoss(request: PurchaseRequestDocument, userId: string) {
-    return String(request.boss.userId) === userId;
+  private isBoss(request: PurchaseRequestDocument, userId: string, userLogin?: string) {
+    if (
+      this.normalizeUserId(request.boss.userId) ===
+      this.normalizeUserId(userId)
+    ) {
+      return true;
+    }
+
+    const bossLogin = request.boss.login?.trim();
+    const viewerLogin = userLogin?.trim();
+
+    return Boolean(bossLogin && viewerLogin && bossLogin === viewerLogin);
   }
 
   private canAccessRequest(
     request: PurchaseRequestDocument,
     userId: string,
     role?: UserRole,
+    userLogin?: string,
   ) {
     if (isSuperAdminRole(role)) {
       return true;
@@ -688,7 +1078,7 @@ export class PurchaseRequestsService implements OnModuleInit {
     return (
       String(request.createdById) === userId ||
       this.isCommissionMember(request, userId) ||
-      this.isBoss(request, userId)
+      this.isBoss(request, userId, userLogin)
     );
   }
 
@@ -696,22 +1086,29 @@ export class PurchaseRequestsService implements OnModuleInit {
     request: PurchaseRequestDocument,
     userId: string,
     role?: UserRole,
+    userLogin?: string,
   ) {
-    if (!this.canAccessRequest(request, userId, role)) {
+    if (!this.canAccessRequest(request, userId, role, userLogin)) {
       throw new ForbiddenException('Ushbu arizaga kirish huquqi yo‘q');
     }
   }
 
   private isApplicant(request: PurchaseRequestDocument, userId: string) {
+    const normalized = this.normalizeUserId(userId);
+
     return (
-      String(request.createdById) === userId ||
-      String(request.applicant?.userId) === userId
+      this.normalizeUserId(request.createdById) === normalized ||
+      this.normalizeUserId(request.applicant?.userId) === normalized
     );
   }
 
-  private getViewerRole(request: PurchaseRequestDocument, userId: string) {
+  private getViewerRole(
+    request: PurchaseRequestDocument,
+    userId: string,
+    userLogin?: string,
+  ) {
+    if (this.isBoss(request, userId, userLogin)) return 'boss' as const;
     if (this.isApplicant(request, userId)) return 'applicant' as const;
-    if (this.isBoss(request, userId)) return 'boss' as const;
     if (this.isCommissionMember(request, userId)) return 'commission' as const;
     return null;
   }
@@ -783,12 +1180,13 @@ export class PurchaseRequestsService implements OnModuleInit {
       approvalSubmitAllowed?: boolean;
       deleteAllowed?: boolean;
       updateAllowed?: boolean;
+      viewerLogin?: string;
     },
   ) {
     this.ensureLegacyFields(request);
 
     const viewerRole = viewerUserId
-      ? this.getViewerRole(request, viewerUserId)
+      ? this.getViewerRole(request, viewerUserId, options?.viewerLogin)
       : null;
 
     const canDelete =
@@ -798,36 +1196,53 @@ export class PurchaseRequestsService implements OnModuleInit {
 
     const myDecision = viewerUserId
       ? request.memberDecisions?.find(
-          (decision) => String(decision.userId) === viewerUserId,
+          (decision) =>
+            this.normalizeUserId(decision.userId) ===
+            this.normalizeUserId(viewerUserId),
         )
       : undefined;
+
+    const workflowStatus = this.getWorkflowStatus(request);
+    const isBossViewer = Boolean(
+      viewerUserId &&
+        this.isBoss(request, viewerUserId, options?.viewerLogin),
+    );
 
     const canSubmitDecision =
       (options?.approvalSubmitAllowed ?? true) &&
       viewerRole === 'commission' &&
+      workflowStatus === PurchaseRequestStatus.COMMISSION_REVIEW &&
       this.isCommissionReviewOpen(request) &&
       !myDecision?.decision;
 
     const canConfirmBossDecision =
-      viewerRole === 'boss' &&
-      request.status === PurchaseRequestStatus.BOSS_DECISION_PENDING;
+      isBossViewer && this.isBossDecisionPhase(request);
 
     const canEditInReview =
       viewerRole === 'applicant' &&
-      request.status === PurchaseRequestStatus.COMMISSION_REVIEW &&
+      workflowStatus === PurchaseRequestStatus.COMMISSION_REVIEW &&
+      Boolean(options?.updateAllowed);
+
+    const canResubmitToBoss =
+      viewerRole === 'applicant' &&
+      this.isBossRejectionPendingResubmit(request) &&
       Boolean(options?.updateAllowed);
 
     const canResubmit =
       viewerRole === 'applicant' &&
-      request.status === PurchaseRequestStatus.PARTIAL_REVISION &&
+      this.hasRejectedMemberDecisions(request) &&
+      workflowStatus === PurchaseRequestStatus.COMMISSION_REVIEW &&
       Boolean(options?.updateAllowed);
+
+    const publicStatus = this.getPublicStatus(request);
 
     return {
       id: request.id,
       requestCode: request.requestCode,
-      status: request.status,
+      status: publicStatus,
+      workflowStatus,
       statusLabel:
-        PURCHASE_REQUEST_STATUS_LABELS[request.status] ?? 'Nomaʼlum holat',
+        PURCHASE_REQUEST_STATUS_LABELS[publicStatus] ?? 'Nomaʼlum holat',
       commissionMembers: request.commissionMembers.map((member) => ({
         userId: String(member.userId),
         displayName: member.displayName,
@@ -898,10 +1313,13 @@ export class PurchaseRequestsService implements OnModuleInit {
         decision: decision.decision ?? null,
         decisionLabel: decision.decision
           ? APPROVAL_DECISION_LABELS[decision.decision]
-          : null,
+          : MEMBER_DECISION_PENDING_LABEL,
         comment: decision.comment,
         decidedAt: decision.decidedAt ?? null,
       })),
+      rejectedMemberIds: (request.memberDecisions ?? [])
+        .filter((decision) => decision.decision === ApprovalDecision.REJECTED)
+        .map((decision) => String(decision.userId)),
       history: (request.history ?? []).map((step) => ({
         type: step.type,
         actor: {
@@ -959,6 +1377,7 @@ export class PurchaseRequestsService implements OnModuleInit {
       canConfirmBossDecision,
       canEditInReview,
       canResubmit,
+      canResubmitToBoss,
       canDelete,
       pendingPurchaseItemCount: this.countPendingPurchaseItems(request),
       pendingPurchaseQuantity: request.items
@@ -1604,15 +2023,25 @@ export class PurchaseRequestsService implements OnModuleInit {
     query: QueryApprovalInboxDto,
     userId: string,
     role?: UserRole,
+    viewerLogin?: string,
   ): Record<string, unknown> {
     const clauses: Record<string, unknown>[] = [];
 
     if (!isSuperAdminRole(role)) {
       const userObjectId = new Types.ObjectId(userId);
+      const bossClauses: Record<string, unknown>[] = [
+        { 'boss.userId': userObjectId },
+      ];
+      const normalizedLogin = viewerLogin?.trim().toLowerCase();
+
+      if (normalizedLogin) {
+        bossClauses.push({ 'boss.login': normalizedLogin });
+      }
+
       clauses.push({
         $or: [
           { 'commissionMembers.userId': userObjectId },
-          { 'boss.userId': userObjectId },
+          ...bossClauses,
         ],
       });
       clauses.push({ createdById: { $ne: userObjectId } });
@@ -1662,6 +2091,11 @@ export class PurchaseRequestsService implements OnModuleInit {
       this.hasPurchaseRequestUpdatePermission(userId, role),
     ]);
 
+    for (const item of items) {
+      this.ensureLegacyFields(item);
+      await this.reconcileCommissionStatus(item);
+    }
+
     return {
       items: items.map((item) =>
         this.toPublic(item, userId, undefined, role, {
@@ -1680,10 +2114,11 @@ export class PurchaseRequestsService implements OnModuleInit {
     query: QueryApprovalInboxDto,
     userId: string,
     role?: UserRole,
+    viewerLogin?: string,
   ) {
     const page = query.page ?? 1;
     const limit = query.limit ?? 10;
-    const filter = this.buildApprovalInboxFilter(query, userId, role);
+    const filter = this.buildApprovalInboxFilter(query, userId, role, viewerLogin);
     const skip = (page - 1) * limit;
 
     const [items, total] = await Promise.all([
@@ -1698,8 +2133,15 @@ export class PurchaseRequestsService implements OnModuleInit {
 
     const totalPages = Math.max(1, Math.ceil(total / limit));
 
+    for (const item of items) {
+      this.ensureLegacyFields(item);
+      await this.reconcileCommissionStatus(item);
+    }
+
     return {
-      items: items.map((item) => this.toPublic(item, userId)),
+      items: items.map((item) =>
+        this.toPublic(item, userId, undefined, role, { viewerLogin }),
+      ),
       total,
       page,
       limit,
@@ -1712,6 +2154,7 @@ export class PurchaseRequestsService implements OnModuleInit {
     userId?: string,
     role?: UserRole,
     options?: { purchasingView?: boolean; historyView?: boolean },
+    viewerLogin?: string,
   ) {
     const request = await this.purchaseRequestModel.findById(id).exec();
 
@@ -1725,9 +2168,11 @@ export class PurchaseRequestsService implements OnModuleInit {
       if (options?.purchasingView) {
         this.assertPurchasingView(request);
       } else if (!options?.historyView) {
-        this.assertCanAccess(request, userId, role);
+        this.assertCanAccess(request, userId, role, viewerLogin);
       }
     }
+
+    await this.reconcileCommissionStatus(request);
 
     return request;
   }
@@ -1740,8 +2185,15 @@ export class PurchaseRequestsService implements OnModuleInit {
     warehouseDispatch?: Parameters<
       typeof this.buildWarehouseMetaFromDispatch
     >[1],
+    viewerLogin?: string,
   ) {
-    const request = await this.findByIdOrFail(id, userId, role, options);
+    const request = await this.findByIdOrFail(
+      id,
+      userId,
+      role,
+      options,
+      viewerLogin,
+    );
 
     const meta =
       warehouseDispatch !== undefined
@@ -1759,6 +2211,7 @@ export class PurchaseRequestsService implements OnModuleInit {
       approvalSubmitAllowed,
       deleteAllowed,
       updateAllowed,
+      viewerLogin,
     });
   }
 
@@ -2541,9 +2994,47 @@ export class PurchaseRequestsService implements OnModuleInit {
     return this.toPublic(request, userId);
   }
 
+  private async ensureSessionRequestCode(
+    session: PurchaseRequestSessionDocument,
+    userId: string,
+  ): Promise<string> {
+    if (session.editingRequestId) {
+      const request = await this.purchaseRequestModel
+        .findById(session.editingRequestId)
+        .select('requestCode')
+        .exec();
+
+      const editingCode = request?.requestCode?.trim().toUpperCase();
+      if (editingCode) {
+        session.reservedRequestCode = editingCode;
+        await session.save();
+        return editingCode;
+      }
+    }
+
+    const applicantStructure =
+      await this.usersService.resolveStructureSnapshotForUser(userId);
+
+    const existing = session.reservedRequestCode?.trim().toUpperCase();
+    if (existing && !(await this.isRequestCodeTaken(existing))) {
+      return existing;
+    }
+
+    const requestCode = await this.allocateUniqueRequestCode(
+      applicantStructure?.shortName,
+      applicantStructure?.structureId,
+    );
+
+    session.reservedRequestCode = requestCode;
+    await session.save();
+
+    return requestCode;
+  }
+
   private async createPurchaseRequestRecord(
     dto: CreatePurchaseRequestDto,
     createdById: string,
+    options?: { requestCode?: string },
   ): Promise<PurchaseRequestDocument> {
     if (dto.commissionMemberIds.includes(dto.bossId)) {
       throw new BadRequestException(
@@ -2567,12 +3058,15 @@ export class PurchaseRequestsService implements OnModuleInit {
     );
     const [boss] = await this.buildUserSnapshots([dto.bossId]);
 
-    const requestCode = await this.nextRequestCode(
-      applicantStructure?.shortName,
-      applicantStructure?.structureId,
-    );
+    let requestCode = options?.requestCode?.trim().toUpperCase();
+    if (!requestCode || (await this.isRequestCodeTaken(requestCode))) {
+      requestCode = await this.allocateUniqueRequestCode(
+        applicantStructure?.shortName,
+        applicantStructure?.structureId,
+      );
+    }
 
-    const number = await this.nextNumber();
+    let number = await this.nextNumber();
     const comment = dto.comment?.trim() ?? '';
     const commissionAgreementText = dto.commissionAgreementText?.trim() ?? '';
 
@@ -2590,48 +3084,73 @@ export class PurchaseRequestsService implements OnModuleInit {
       ? Boolean(dto.purchaseDeadlineMandatory)
       : false;
 
-    try {
-      return await this.purchaseRequestModel.create({
-        number,
-        requestCode,
-        commissionMembers,
-        boss,
-        items: this.normalizeRequestItems(dto.items),
-        comment,
-        commissionAgreementText,
-        purchaseDeadline,
-        purchaseDeadlineMandatory,
-        ...purchasePeriod,
-        createdById: new Types.ObjectId(createdById),
-        applicant: applicantSnapshot,
-        applicantStructure: applicantStructure
-          ? {
-              structureId: new Types.ObjectId(applicantStructure.structureId),
-              fullName: applicantStructure.fullName,
-              shortName: applicantStructure.shortName,
-              leaderName: applicantStructure.leaderName?.trim() || '',
-              capturedAt: applicantStructure.capturedAt,
-            }
-          : undefined,
-        memberDecisions: this.buildMemberDecisions(commissionMembers),
-        history: [
-          this.buildSubmittedHistoryStep(
-            applicantSnapshot,
-            comment,
-            purchaseDeadline,
-            purchaseDeadlineMandatory,
-          ),
-        ],
-      });
-    } catch (error) {
-      if (error instanceof MongoServerError && error.code === 11000) {
+    const payload = {
+      commissionMembers,
+      boss,
+      items: this.normalizeRequestItems(dto.items),
+      comment,
+      commissionAgreementText,
+      purchaseDeadline,
+      purchaseDeadlineMandatory,
+      ...purchasePeriod,
+      createdById: new Types.ObjectId(createdById),
+      applicant: applicantSnapshot,
+      applicantStructure: applicantStructure
+        ? {
+            structureId: new Types.ObjectId(applicantStructure.structureId),
+            fullName: applicantStructure.fullName,
+            shortName: applicantStructure.shortName,
+            leaderName: applicantStructure.leaderName?.trim() || '',
+            capturedAt: applicantStructure.capturedAt,
+          }
+        : undefined,
+      memberDecisions: this.buildMemberDecisions(commissionMembers),
+      history: [
+        this.buildSubmittedHistoryStep(
+          applicantSnapshot,
+          comment,
+          purchaseDeadline,
+          purchaseDeadlineMandatory,
+        ),
+      ],
+    };
+
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      try {
+        return await this.purchaseRequestModel.create({
+          number,
+          requestCode,
+          ...payload,
+        });
+      } catch (error) {
+        if (!(error instanceof MongoServerError) || error.code !== 11000) {
+          throw error;
+        }
+
+        const duplicateField = String(error.message ?? '').toLowerCase();
+
+        if (duplicateField.includes('requestcode') && attempt < 5) {
+          requestCode = await this.allocateUniqueRequestCode(
+            applicantStructure?.shortName,
+            applicantStructure?.structureId,
+          );
+          continue;
+        }
+
+        if (duplicateField.includes('number') && attempt < 5) {
+          number = await this.nextNumber();
+          continue;
+        }
+
         throw new ConflictException(
           'Ariza yaratishda xatolik yuz berdi. Qayta urinib ko‘ring',
         );
       }
-
-      throw error;
     }
+
+    throw new ConflictException(
+      'Ariza yaratishda xatolik yuz berdi. Qayta urinib ko‘ring',
+    );
   }
 
   async create(dto: CreatePurchaseRequestDto, createdById: string) {
@@ -2658,7 +3177,7 @@ export class PurchaseRequestsService implements OnModuleInit {
 
     if (request.status !== PurchaseRequestStatus.COMMISSION_REVIEW) {
       throw new BadRequestException(
-        'Arizani faqat «Komissiya tekshiruvida» holatida tahrirlash mumkin',
+        'Arizani faqat «Kelishilmoqda» holatida tahrirlash mumkin',
       );
     }
 
@@ -2688,6 +3207,7 @@ export class PurchaseRequestsService implements OnModuleInit {
       ? Boolean(dto.purchaseDeadlineMandatory)
       : false;
     const now = new Date();
+    const hadMemberAgreement = this.hasAnyMemberAgreed(request);
 
     request.commissionMembers = commissionMembers;
     request.boss = boss;
@@ -2703,16 +3223,26 @@ export class PurchaseRequestsService implements OnModuleInit {
     request.memberDecisions = this.buildMemberDecisions(commissionMembers);
     request.markModified('memberDecisions');
     request.markModified('items');
-    this.clearBossDecision(request);
-    request.resubmittedAfterPartialAt = undefined;
+
+    if (hadMemberAgreement) {
+      this.clearBossDecision(request);
+      request.resubmittedAfterPartialAt = undefined;
+    }
+
     request.status = PurchaseRequestStatus.COMMISSION_REVIEW;
+
+    const historyComment = hadMemberAgreement
+      ? comment
+        ? `${comment}\n\n(Barcha kelishuvlar bekor qilindi — qayta kelishish talab etiladi)`
+        : 'Barcha kelishuvlar bekor qilindi — qayta kelishish talab etiladi'
+      : comment;
 
     request.history.push({
       type: HistoryStepType.UPDATED,
       actorUserId: request.applicant.userId,
       actorDisplayName: request.applicant.displayName,
       actorLogin: request.applicant.login,
-      comment,
+      comment: historyComment,
       purchaseDeadline: purchaseDeadline ?? undefined,
       purchaseDeadlineMandatory: purchaseDeadline
         ? purchaseDeadlineMandatory
@@ -2795,15 +3325,9 @@ export class PurchaseRequestsService implements OnModuleInit {
       throw new ForbiddenException('Faqat ariza beruvchi tahrirlashi mumkin');
     }
 
-    if (request.status !== PurchaseRequestStatus.COMMISSION_REVIEW) {
+    if (!this.canOpenDocumentEditSession(request)) {
       throw new BadRequestException(
-        'Arizani faqat «Komissiya tekshiruvida» holatida tahrirlash mumkin',
-      );
-    }
-
-    if (!request.submittedBildirgi || !request.submittedKelishuv) {
-      throw new BadRequestException(
-        'Yuborilgan Word hujjatlari topilmadi — avval hujjatlarni yuklab oling',
+        'Hujjatlarni tahrirlash uchun ariza holati mos emas',
       );
     }
 
@@ -2821,6 +3345,7 @@ export class PurchaseRequestsService implements OnModuleInit {
     const session = await this.purchaseRequestSessionModel.create({
       userId: userObjectId,
       editingRequestId: new Types.ObjectId(requestId),
+      reservedRequestCode: request.requestCode,
       title: `Tahrir: ${request.requestCode}`,
       commissionMemberIds: request.commissionMembers.map((member) => member.userId),
       bossId: request.boss.userId,
@@ -2843,10 +3368,44 @@ export class PurchaseRequestsService implements OnModuleInit {
         this.sessionDocumentsService.createApplicantVerificationToken(),
     });
 
-    await this.sessionDocumentsService.copyRequestDocumentsToSession(
-      requestId,
-      session.id,
-    );
+    const sessionId = String(session._id);
+    let documentsReady = false;
+
+    if (request.submittedBildirgi && request.submittedKelishuv) {
+      try {
+        const hasDocxFiles =
+          await this.sessionDocumentsService.requestHasSubmittedDocxFiles(
+            request,
+          );
+
+        if (hasDocxFiles) {
+          await this.sessionDocumentsService.copyRequestDocumentsToSession(
+            requestId,
+            sessionId,
+            {
+              bildirgi: request.submittedBildirgi,
+              kelishuv: request.submittedKelishuv,
+            },
+          );
+          documentsReady = true;
+        }
+      } catch (error) {
+        this.logger.warn(
+          `Ariza ${requestId} hujjatlarini seansga nusxalab bo‘lmadi — qayta yaratiladi`,
+          error instanceof Error ? error.message : String(error),
+        );
+      }
+    }
+
+    if (!documentsReady) {
+      await this.sessionDocumentsService.prepareSessionDocuments(
+        session,
+        userId,
+        sessionId,
+        session.applicantVerificationToken!,
+        request.requestCode,
+      );
+    }
 
     const version = Date.now();
     session.documentsPreparedAt = new Date();
@@ -2897,7 +3456,8 @@ export class PurchaseRequestsService implements OnModuleInit {
     }
 
     const decisionIndex = request.memberDecisions.findIndex(
-      (decision) => String(decision.userId) === userId,
+      (decision) =>
+        this.normalizeUserId(decision.userId) === this.normalizeUserId(userId),
     );
 
     if (decisionIndex < 0) {
@@ -2930,12 +3490,19 @@ export class PurchaseRequestsService implements OnModuleInit {
     });
     request.markModified('history');
 
-    if (dto.decision === ApprovalDecision.PARTIAL) {
+    if (dto.decision === ApprovalDecision.REJECTED) {
       request.resubmittedAfterPartialAt = undefined;
     }
 
+    this.syncMemberDecisionsWithCommission(request);
     request.status = this.recomputeStatus(request);
     await request.save();
+
+    if (dto.decision === ApprovalDecision.REJECTED) {
+      await this.notificationsEvents.notifyPurchaseRequestCommissionRejection(
+        request,
+      );
+    }
 
     this.emitPurchaseRequestChanged(request, 'updated');
 
@@ -2947,6 +3514,7 @@ export class PurchaseRequestsService implements OnModuleInit {
     dto: ResubmitPurchaseRequestDto,
     userId: string,
     role?: UserRole,
+    options?: { skipKelishuvRegeneration?: boolean },
   ) {
     await this.assertPurchaseRequestUpdatePermission(userId, role);
 
@@ -2958,24 +3526,94 @@ export class PurchaseRequestsService implements OnModuleInit {
       );
     }
 
-    if (request.status !== PurchaseRequestStatus.PARTIAL_REVISION) {
+    const isBossResubmit =
+      dto.resubmitTarget === 'boss' ||
+      this.isBossRejectionPendingResubmit(request);
+
+    if (isBossResubmit) {
+      if (!this.isBossRejectionPendingResubmit(request)) {
+        throw new BadRequestException(
+          'Boshliqqa qayta yuborish faqat boshliq rad etgan va komissiya kelishgan holatda mumkin',
+        );
+      }
+
+      const comment = dto.comment?.trim() ?? '';
+      const now = new Date();
+
+      await this.applyResubmitFieldsToRequest(request, dto);
+      this.clearBossDecision(request);
+      request.status = PurchaseRequestStatus.BOSS_DECISION_PENDING;
+
+      request.history.push({
+        type: HistoryStepType.RESUBMITTED,
+        actorUserId: request.applicant.userId,
+        actorDisplayName: request.applicant.displayName,
+        actorLogin: request.applicant.login,
+        comment: comment || 'Boshliqqa qayta yuborildi',
+        createdAt: now,
+      });
+      request.markModified('history');
+
+      await request.save();
+
+      await this.regenerateKelishuvAfterResubmitIfNeeded(request, {
+        skipWhenDocumentsProvided: options?.skipKelishuvRegeneration,
+      });
+
+      this.emitPurchaseRequestChanged(request, 'updated');
+
+      return this.toPublic(request, userId);
+    }
+
+    if (!this.isCommissionResubmitPhase(request)) {
       throw new BadRequestException(
-        'Faqat qisman tasdiqlangan arizani qayta yuborish mumkin',
+        'Faqat kelishuv bosqichidagi arizani qayta yuborish mumkin',
+      );
+    }
+
+    const rejectedMemberIds = (request.memberDecisions ?? [])
+      .filter((decision) => decision.decision === ApprovalDecision.REJECTED)
+      .map((decision) => String(decision.userId));
+
+    if (!rejectedMemberIds.length) {
+      throw new BadRequestException(
+        'Qayta yuborish uchun rad etgan komissiya a’zosi topilmadi',
+      );
+    }
+
+    const selectedMemberIds = [
+      ...new Set((dto.resubmitToMemberIds ?? []).map(String)),
+    ];
+
+    if (!selectedMemberIds.length) {
+      throw new BadRequestException(
+        'Qayta kelishish uchun kamida bitta rad etgan a’zoni tanlang',
+      );
+    }
+
+    if (
+      selectedMemberIds.some((memberId) => !rejectedMemberIds.includes(memberId))
+    ) {
+      throw new BadRequestException(
+        'Faqat rad etgan komissiya a’zolarini tanlash mumkin',
       );
     }
 
     const comment = dto.comment?.trim() ?? '';
     const now = new Date();
 
-    request.items = this.normalizeRequestItems(dto.items);
-    request.comment = comment;
-    request.memberDecisions =
-      this.preserveMemberDecisionsAfterResubmit(request);
+    await this.applyResubmitFieldsToRequest(request, dto);
+    request.memberDecisions = this.preserveMemberDecisionsAfterResubmit(
+      request,
+      selectedMemberIds,
+    );
     request.markModified('memberDecisions');
     this.clearBossDecision(request);
     request.resubmittedAfterPartialAt = now;
-    // Komissiya hammasi «Tasdiqlash» bergan bo‘lsa — to‘g‘ridan-to‘g‘ri boshliqqa
     request.status = this.recomputeStatus(request);
+    if (request.status === PurchaseRequestStatus.PARTIAL_REVISION) {
+      request.status = PurchaseRequestStatus.COMMISSION_REVIEW;
+    }
 
     request.history.push({
       type: HistoryStepType.RESUBMITTED,
@@ -2988,9 +3626,65 @@ export class PurchaseRequestsService implements OnModuleInit {
 
     await request.save();
 
+    await this.regenerateKelishuvAfterResubmitIfNeeded(request, {
+      skipWhenDocumentsProvided: options?.skipKelishuvRegeneration,
+    });
+
     this.emitPurchaseRequestChanged(request, 'updated');
 
     return this.toPublic(request, userId);
+  }
+
+  async resubmitWithDocuments(
+    id: string,
+    dto: ResubmitPurchaseRequestDto,
+    userId: string,
+    role: UserRole | undefined,
+    files: {
+      bildirgi?: Express.Multer.File;
+      kelishuv?: Express.Multer.File;
+    },
+  ) {
+    if (!files?.bildirgi?.buffer?.length || !files?.kelishuv?.buffer?.length) {
+      throw new BadRequestException(
+        'Bildirgi va kelishuv Word fayllari yuborilishi shart',
+      );
+    }
+
+    this.assertSubmittedDocxUpload(files.bildirgi);
+    this.assertSubmittedDocxUpload(files.kelishuv);
+
+    const result = await this.resubmit(id, dto, userId, role, {
+      skipKelishuvRegeneration: true,
+    });
+    void result;
+    const request = await this.findByIdOrFail(id, userId, role);
+
+    const submittedDocuments =
+      await this.sessionDocumentsService.saveSubmittedDocumentsToRequest(
+        id,
+        request.requestCode,
+        {
+          bildirgi: files.bildirgi.buffer,
+          kelishuv: files.kelishuv.buffer,
+        },
+      );
+
+    request.submittedBildirgi = submittedDocuments.bildirgi;
+    request.submittedKelishuv = submittedDocuments.kelishuv;
+    await request.save();
+
+    this.emitPurchaseRequestChanged(request, 'updated');
+
+    const [deleteAllowed, updateAllowed] = await Promise.all([
+      this.hasPurchaseRequestDeletePermission(userId, role),
+      this.hasPurchaseRequestUpdatePermission(userId, role),
+    ]);
+
+    return this.toPublic(request, userId, undefined, role, {
+      deleteAllowed,
+      updateAllowed,
+    });
   }
 
   async confirmBossDecision(
@@ -2998,16 +3692,32 @@ export class PurchaseRequestsService implements OnModuleInit {
     dto: ConfirmBossDecisionDto,
     userId: string,
     role?: UserRole,
+    userLogin?: string,
   ) {
-    const request = await this.findByIdOrFail(id, userId, role);
+    const request = await this.findByIdOrFail(id, userId, role, undefined, userLogin);
 
-    if (!this.isBoss(request, userId)) {
+    if (!this.isBoss(request, userId, userLogin)) {
       throw new ForbiddenException('Faqat boshliq qaror berishi mumkin');
     }
 
-    if (request.status !== PurchaseRequestStatus.BOSS_DECISION_PENDING) {
+    await this.reconcileCommissionStatus(request);
+    this.syncMemberDecisionsWithCommission(request);
+
+    if (!this.isBossDecisionPhase(request)) {
+      if (!this.areAllCommissionMembersAgreed(request)) {
+        throw new BadRequestException(
+          'Boshliq qarorini berish uchun barcha komissiya a’zolari kelishishi kerak',
+        );
+      }
+
       throw new BadRequestException(
         'Boshliq qarorini hozirgi bosqichda berib bo‘lmaydi',
+      );
+    }
+
+    if (dto.decision === ApprovalDecision.PARTIAL) {
+      throw new BadRequestException(
+        'Boshliq uchun qisman kelishish mavjud emas',
       );
     }
 
@@ -3021,10 +3731,6 @@ export class PurchaseRequestsService implements OnModuleInit {
     switch (dto.decision) {
       case ApprovalDecision.APPROVED:
         request.status = PurchaseRequestStatus.PURCHASING;
-        break;
-      case ApprovalDecision.PARTIAL:
-        request.status = PurchaseRequestStatus.PARTIAL_REVISION;
-        request.resubmittedAfterPartialAt = undefined;
         break;
       case ApprovalDecision.REJECTED:
         request.status = PurchaseRequestStatus.REJECTED;
@@ -3046,9 +3752,26 @@ export class PurchaseRequestsService implements OnModuleInit {
 
     await request.save();
 
+    if (dto.decision === ApprovalDecision.APPROVED) {
+      try {
+        const submittedDocuments =
+          await this.sessionDocumentsService.convertSubmittedDocumentsToPdf(
+            request,
+          );
+        request.submittedBildirgi = submittedDocuments.bildirgi;
+        request.submittedKelishuv = submittedDocuments.kelishuv;
+        await request.save();
+      } catch (error) {
+        this.logger.error(
+          `Ariza ${request.id} hujjatlarini PDF ga aylantirishda xatolik`,
+          error instanceof Error ? error.stack : String(error),
+        );
+      }
+    }
+
     this.emitPurchaseRequestChanged(request, 'updated');
 
-    return this.toPublic(request, userId);
+    return this.toPublic(request, userId, undefined, role, { viewerLogin: userLogin });
   }
 
   async remove(id: string, userId: string, role?: UserRole) {
@@ -3059,7 +3782,7 @@ export class PurchaseRequestsService implements OnModuleInit {
     if (!this.canDeleteRequest(request, userId, role)) {
       if (request.status !== PurchaseRequestStatus.COMMISSION_REVIEW) {
         throw new ForbiddenException(
-          'Arizani faqat «Komissiya tekshiruvida» holatida o‘chirish mumkin',
+          'Arizani faqat «Kelishilmoqda» holatida o‘chirish mumkin',
         );
       }
 
@@ -3130,6 +3853,7 @@ export class PurchaseRequestsService implements OnModuleInit {
       title: `Ariza ${total + 1}`,
       items: [],
       comment: '',
+      purchasePeriodType: PurchasePeriodType.PLAIN,
     };
 
     try {
@@ -3193,19 +3917,25 @@ export class PurchaseRequestsService implements OnModuleInit {
       dto.bossId = String(body.bossId);
     }
 
-    if (
-      body.purchasePeriodType === PurchasePeriodType.QUARTER ||
-      body.purchasePeriodType === PurchasePeriodType.MONTH
-    ) {
-      dto.purchasePeriodType = body.purchasePeriodType;
-      dto.purchasePeriodYear = toInt(body.purchasePeriodYear);
+    const purchasePeriodType = parsePurchasePeriodType(body.purchasePeriodType);
 
-      if (body.purchasePeriodType === PurchasePeriodType.QUARTER) {
-        dto.purchasePeriodQuarter = toInt(body.purchasePeriodQuarter);
-      }
+    if (purchasePeriodType) {
+      dto.purchasePeriodType = purchasePeriodType;
 
-      if (body.purchasePeriodType === PurchasePeriodType.MONTH) {
-        dto.purchasePeriodMonth = toInt(body.purchasePeriodMonth);
+      if (purchasePeriodType === PurchasePeriodType.PLAIN) {
+        dto.purchasePeriodYear = undefined;
+        dto.purchasePeriodQuarter = undefined;
+        dto.purchasePeriodMonth = undefined;
+      } else {
+        dto.purchasePeriodYear = toInt(body.purchasePeriodYear);
+
+        if (purchasePeriodType === PurchasePeriodType.QUARTER) {
+          dto.purchasePeriodQuarter = toInt(body.purchasePeriodQuarter);
+        }
+
+        if (purchasePeriodType === PurchasePeriodType.MONTH) {
+          dto.purchasePeriodMonth = toInt(body.purchasePeriodMonth);
+        }
       }
     }
 
@@ -3223,8 +3953,15 @@ export class PurchaseRequestsService implements OnModuleInit {
       throw new BadRequestException('Kamida bitta komissiya a’zosini tanlang');
     }
 
-    if (!sessionDto.purchasePeriodType || !sessionDto.purchasePeriodYear) {
-      throw new BadRequestException('Sotib olish davrini tanlang');
+    const purchasePeriodType = resolvePurchasePeriodType(
+      sessionDto.purchasePeriodType,
+    );
+
+    if (
+      purchasePeriodType !== PurchasePeriodType.PLAIN &&
+      !sessionDto.purchasePeriodYear
+    ) {
+      throw new BadRequestException('Sotib olish yilini tanlang');
     }
 
     const dto: UpdatePurchaseRequestDto = {
@@ -3239,7 +3976,7 @@ export class PurchaseRequestsService implements OnModuleInit {
       })),
       comment: sessionDto.comment ?? '',
       commissionAgreementText: sessionDto.commissionAgreementText ?? '',
-      purchasePeriodType: sessionDto.purchasePeriodType,
+      purchasePeriodType,
       purchasePeriodYear: sessionDto.purchasePeriodYear,
       purchasePeriodQuarter: sessionDto.purchasePeriodQuarter,
       purchasePeriodMonth: sessionDto.purchasePeriodMonth,
@@ -3248,6 +3985,27 @@ export class PurchaseRequestsService implements OnModuleInit {
     validatePurchasePeriod(dto);
 
     return dto;
+  }
+
+  normalizeResubmitPayload(body: Record<string, unknown>): ResubmitPurchaseRequestDto {
+    const updateDto = this.normalizeUpdatePayload(body);
+    const resubmitTarget = body.resubmitTarget === 'boss' ? 'boss' : 'commission';
+    const resubmitToMemberIds = (body.resubmitToMemberIds ?? [])
+      .map((value) => String(value))
+      .filter((value) => /^[a-f\d]{24}$/i.test(value));
+
+    if (resubmitTarget !== 'boss' && !resubmitToMemberIds.length) {
+      throw new BadRequestException(
+        'Qayta kelishish uchun kamida bitta rad etgan a’zoni tanlang',
+      );
+    }
+
+    return {
+      ...updateDto,
+      resubmitTarget,
+      resubmitToMemberIds:
+        resubmitTarget === 'boss' ? undefined : resubmitToMemberIds,
+    };
   }
 
   async saveActiveSession(
@@ -3287,17 +4045,24 @@ export class PurchaseRequestsService implements OnModuleInit {
 
     if (dto.purchasePeriodType) {
       session.purchasePeriodType = dto.purchasePeriodType;
-      session.purchasePeriodYear = dto.purchasePeriodYear;
-      session.purchasePeriodQuarter =
-        dto.purchasePeriodType === PurchasePeriodType.QUARTER
-          ? dto.purchasePeriodQuarter
-          : undefined;
-      session.purchasePeriodMonth =
-        dto.purchasePeriodType === PurchasePeriodType.MONTH
-          ? dto.purchasePeriodMonth
-          : undefined;
-    } else {
-      session.purchasePeriodType = undefined;
+
+      if (dto.purchasePeriodType === PurchasePeriodType.PLAIN) {
+        session.purchasePeriodYear = undefined;
+        session.purchasePeriodQuarter = undefined;
+        session.purchasePeriodMonth = undefined;
+      } else {
+        session.purchasePeriodYear = dto.purchasePeriodYear;
+        session.purchasePeriodQuarter =
+          dto.purchasePeriodType === PurchasePeriodType.QUARTER
+            ? dto.purchasePeriodQuarter
+            : undefined;
+        session.purchasePeriodMonth =
+          dto.purchasePeriodType === PurchasePeriodType.MONTH
+            ? dto.purchasePeriodMonth
+            : undefined;
+      }
+    } else if (!session.purchasePeriodType) {
+      session.purchasePeriodType = PurchasePeriodType.PLAIN;
       session.purchasePeriodYear = undefined;
       session.purchasePeriodQuarter = undefined;
       session.purchasePeriodMonth = undefined;
@@ -3376,6 +4141,7 @@ export class PurchaseRequestsService implements OnModuleInit {
     userId: string,
     sessionId: string,
     dto?: SavePurchaseRequestSessionDto,
+    options?: { regenerateKelishuvOnly?: boolean },
   ) {
     if (this.shouldSyncSessionBeforePrepare(dto)) {
       await this.saveActiveSession(userId, sessionId, dto!);
@@ -3388,6 +4154,8 @@ export class PurchaseRequestsService implements OnModuleInit {
         'Hujjat tayyorlash uchun komissiya va boshliq tanlangan bo‘lishi kerak',
       );
     }
+
+    const requestCode = await this.ensureSessionRequestCode(session, userId);
 
     if (!session.documentToken) {
       session.documentToken = this.sessionDocumentsService.createDocumentToken();
@@ -3409,12 +4177,27 @@ export class PurchaseRequestsService implements OnModuleInit {
         'kelishuv',
       )) > 0;
 
-    if (!hasExistingEditDocuments) {
+    if (options?.regenerateKelishuvOnly) {
+      await this.sessionDocumentsService.writeKelishuvDocument(
+        session,
+        userId,
+        sessionId,
+        requestCode,
+      );
+    } else if (!hasExistingEditDocuments) {
       await this.sessionDocumentsService.prepareSessionDocuments(
         session,
         userId,
         sessionId,
         session.applicantVerificationToken,
+        requestCode,
+      );
+    } else {
+      await this.sessionDocumentsService.writeKelishuvDocument(
+        session,
+        userId,
+        sessionId,
+        requestCode,
       );
     }
 
@@ -3428,6 +4211,7 @@ export class PurchaseRequestsService implements OnModuleInit {
 
     return {
       sessionId,
+      requestCode,
       documentToken: session.documentToken,
       documentsPreparedAt: session.documentsPreparedAt,
       documentVersions: session.documentVersions,
@@ -3597,6 +4381,17 @@ export class PurchaseRequestsService implements OnModuleInit {
 
     const session = await this.findActiveSessionOrFail(userId, sessionId);
 
+    if (session.editingRequestId) {
+      throw new BadRequestException(
+        'Tahrirlash seansini «Saqlash» tugmasi orqali yangilang',
+      );
+    }
+
+    if (!session.purchasePeriodType) {
+      session.purchasePeriodType = PurchasePeriodType.PLAIN;
+      await session.save();
+    }
+
     if (!this.sessionHasContent(session)) {
       throw new BadRequestException('Faol seans bo‘sh — avval ma’lumot kiriting');
     }
@@ -3649,14 +4444,21 @@ export class PurchaseRequestsService implements OnModuleInit {
       );
     }
 
+    const purchasePeriodType = resolvePurchasePeriodType(
+      session.purchasePeriodType,
+    );
+
     const createDto: CreatePurchaseRequestDto = {
       commissionMemberIds: session.commissionMemberIds.map(String),
       bossId: String(session.bossId),
       items: normalizedItems,
       comment: session.comment?.trim() ?? '',
       commissionAgreementText: session.commissionAgreementText?.trim() ?? '',
-      purchasePeriodType: session.purchasePeriodType!,
-      purchasePeriodYear: session.purchasePeriodYear!,
+      purchasePeriodType,
+      purchasePeriodYear:
+        purchasePeriodType === PurchasePeriodType.PLAIN
+          ? undefined
+          : session.purchasePeriodYear,
       purchasePeriodQuarter: session.purchasePeriodQuarter,
       purchasePeriodMonth: session.purchasePeriodMonth,
     };
@@ -3674,7 +4476,49 @@ export class PurchaseRequestsService implements OnModuleInit {
       files,
     );
 
-    const request = await this.createPurchaseRequestRecord(createDto, userId);
+    const reservedRequestCode = await this.ensureSessionRequestCode(
+      session,
+      userId,
+    );
+
+    const existingRequest = await this.findRequestCreatedFromSession(
+      session,
+      userId,
+      reservedRequestCode,
+    );
+
+    if (existingRequest) {
+      if (!existingRequest.submittedBildirgi || !existingRequest.submittedKelishuv) {
+        const submittedDocuments =
+          await this.sessionDocumentsService.saveSubmittedDocumentsToRequest(
+            String(existingRequest._id),
+            existingRequest.requestCode,
+            documentBuffers,
+          );
+
+        existingRequest.submittedBildirgi = submittedDocuments.bildirgi;
+        existingRequest.submittedKelishuv = submittedDocuments.kelishuv;
+
+        if (
+          !existingRequest.applicantVerificationToken &&
+          session.applicantVerificationToken
+        ) {
+          existingRequest.applicantVerificationToken =
+            session.applicantVerificationToken;
+        }
+
+        await existingRequest.save();
+        this.emitPurchaseRequestChanged(existingRequest, 'created');
+      }
+
+      await this.purchaseRequestSessionModel.findByIdAndDelete(session.id).exec();
+
+      return this.toPublic(existingRequest, userId);
+    }
+
+    const request = await this.createPurchaseRequestRecord(createDto, userId, {
+      requestCode: reservedRequestCode,
+    });
     const submittedDocuments =
       await this.sessionDocumentsService.saveSubmittedDocumentsToRequest(
         String(request._id),

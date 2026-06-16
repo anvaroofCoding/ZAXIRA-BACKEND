@@ -11,6 +11,7 @@ import { Types } from 'mongoose';
 import { UsersService } from '../users/users.service';
 import { PurchaseRequestCommissionDocumentService } from './purchase-request-commission-document.service';
 import { PurchaseRequestDocumentService } from './purchase-request-document.service';
+import { PurchaseRequestDocument } from './schemas/purchase-request.schema';
 import { PurchaseRequestSession } from './schemas/purchase-request-session.schema';
 import { PurchaseRequestDocumentSource } from './types/purchase-request-document-source.type';
 import { PurchaseFileEmbeddable } from './schemas/purchase-details.schema';
@@ -97,6 +98,7 @@ export class PurchaseRequestSessionDocumentsService {
     session: PurchaseRequestSession,
     userId: string,
     sessionId: string,
+    requestCode: string,
   ): Promise<PurchaseRequestDocumentSource> {
     const applicantUser = await this.usersService.findByIdOrFail(userId);
     const applicantStructure =
@@ -117,11 +119,9 @@ export class PurchaseRequestSessionDocumentsService {
           },
         ];
 
-    const shortId = sessionId.slice(-4).toUpperCase();
-
     return {
       id: sessionId,
-      requestCode: `QORALAMA-${shortId}`,
+      requestCode: requestCode.trim(),
       comment: session.comment?.trim() ?? '',
       commissionAgreementText: session.commissionAgreementText?.trim() ?? '',
       items: (session.items ?? []).map((item) => ({
@@ -152,32 +152,80 @@ export class PurchaseRequestSessionDocumentsService {
     };
   }
 
+  async writeKelishuvDocument(
+    session: PurchaseRequestSession,
+    userId: string,
+    sessionId: string,
+    requestCode: string,
+  ) {
+    const dir = this.getSessionDir(sessionId);
+    await mkdir(dir, { recursive: true });
+
+    const draft = await this.buildDraftSource(
+      session,
+      userId,
+      sessionId,
+      requestCode,
+    );
+    const kelishuvBuffer =
+      await this.commissionDocumentService.generateDocx(draft);
+
+    await writeFile(
+      this.resolveDocumentPath(sessionId, 'kelishuv'),
+      kelishuvBuffer,
+    );
+  }
+
   async prepareSessionDocuments(
     session: PurchaseRequestSession,
     userId: string,
     sessionId: string,
     applicantVerificationToken: string,
+    requestCode: string,
+    options?: { skipBildirgi?: boolean },
   ) {
     const dir = this.getSessionDir(sessionId);
     await mkdir(dir, { recursive: true });
 
-    const draft = await this.buildDraftSource(session, userId, sessionId);
-    const applicantQrUrl = this.buildApplicantQrUrl(applicantVerificationToken);
+    const draft = await this.buildDraftSource(
+      session,
+      userId,
+      sessionId,
+      requestCode,
+    );
 
-    const [bildirgiBuffer, kelishuvBuffer] = await Promise.all([
-      this.documentService.generateDocx(draft, { applicantQrUrl }),
-      this.commissionDocumentService.generateDocx(draft),
-    ]);
+    await this.writeKelishuvDocument(session, userId, sessionId, requestCode);
 
-    await Promise.all([
-      writeFile(this.resolveDocumentPath(sessionId, 'bildirgi'), bildirgiBuffer),
-      writeFile(this.resolveDocumentPath(sessionId, 'kelishuv'), kelishuvBuffer),
-    ]);
+    if (!options?.skipBildirgi) {
+      const applicantQrUrl = this.buildApplicantQrUrl(applicantVerificationToken);
+      const bildirgiBuffer = await this.documentService.generateDocx(draft, {
+        applicantQrUrl,
+      });
+
+      await writeFile(
+        this.resolveDocumentPath(sessionId, 'bildirgi'),
+        bildirgiBuffer,
+      );
+    }
 
     return {
       bildirgiPath: this.resolveDocumentPath(sessionId, 'bildirgi'),
       kelishuvPath: this.resolveDocumentPath(sessionId, 'kelishuv'),
     };
+  }
+
+  async regenerateRequestKelishuvDocument(request: PurchaseRequestDocument) {
+    const source = this.buildDocumentSourceFromRequest(request);
+    const buffer = await this.commissionDocumentService.generateDocx(source);
+    const targetDir = this.getRequestDocumentsDir(request.id);
+    await mkdir(targetDir, { recursive: true });
+    await writeFile(path.join(targetDir, 'kelishuv.docx'), buffer);
+
+    return this.buildSubmittedDocumentMeta(
+      'kelishuv',
+      request.requestCode,
+      buffer,
+    );
   }
 
   async readDocument(sessionId: string, docType: SessionDocumentType) {
@@ -300,15 +348,68 @@ export class PurchaseRequestSessionDocumentsService {
     return path.join(this.getRequestDocumentsDir(requestId), safeName);
   }
 
-  async copyRequestDocumentsToSession(requestId: string, sessionId: string) {
+  async requestHasSubmittedDocxFiles(
+    request: Pick<
+      PurchaseRequestDocument,
+      'id' | 'submittedBildirgi' | 'submittedKelishuv'
+    >,
+  ): Promise<boolean> {
+    const hasDocx = async (
+      storedName: string | undefined,
+      docType: SessionDocumentType,
+    ) => {
+      const candidates = [storedName, `${docType}.docx`].filter(
+        (value): value is string => Boolean(value),
+      );
+
+      for (const candidate of candidates) {
+        if (!candidate.toLowerCase().endsWith('.docx')) {
+          continue;
+        }
+
+        try {
+          const filePath = this.resolveRequestDocumentPath(request.id, candidate);
+          const fileStat = await stat(filePath);
+          if (fileStat.isFile() && fileStat.size > 0) {
+            return true;
+          }
+        } catch {
+          // keyingi nomni sinab ko‘ramiz
+        }
+      }
+
+      return false;
+    };
+
+    const [bildirgiReady, kelishuvReady] = await Promise.all([
+      hasDocx(request.submittedBildirgi?.storedName, 'bildirgi'),
+      hasDocx(request.submittedKelishuv?.storedName, 'kelishuv'),
+    ]);
+
+    return bildirgiReady && kelishuvReady;
+  }
+
+  async copyRequestDocumentsToSession(
+    requestId: string,
+    sessionId: string,
+    fileMeta?: {
+      bildirgi?: Pick<PurchaseFileEmbeddable, 'storedName'>;
+      kelishuv?: Pick<PurchaseFileEmbeddable, 'storedName'>;
+    },
+  ) {
     const dir = this.getSessionDir(sessionId);
     await mkdir(dir, { recursive: true });
 
     for (const docType of ['bildirgi', 'kelishuv'] as const) {
-      const sourcePath = this.resolveRequestDocumentPath(
-        requestId,
-        `${docType}.docx`,
-      );
+      const storedName = fileMeta?.[docType]?.storedName ?? `${docType}.docx`;
+
+      if (!storedName.toLowerCase().endsWith('.docx')) {
+        throw new NotFoundException(
+          `${docType === 'bildirgi' ? 'Bildirgi' : 'Kelishuv'} Word fayli topilmadi`,
+        );
+      }
+
+      const sourcePath = this.resolveRequestDocumentPath(requestId, storedName);
       const targetPath = this.resolveDocumentPath(sessionId, docType);
 
       try {
@@ -320,5 +421,65 @@ export class PurchaseRequestSessionDocumentsService {
         );
       }
     }
+  }
+
+  private buildDocumentSourceFromRequest(
+    request: PurchaseRequestDocument,
+  ): PurchaseRequestDocumentSource {
+    return {
+      id: request.id,
+      requestCode: request.requestCode,
+      comment: request.comment?.trim() ?? '',
+      commissionAgreementText: request.commissionAgreementText?.trim() ?? '',
+      items: request.items ?? [],
+      commissionMembers: request.commissionMembers ?? [],
+      boss: request.boss,
+      applicant: request.applicant,
+      applicantStructure: request.applicantStructure,
+      bossDecision: request.bossDecision,
+      bossConfirmedAt: request.bossConfirmedAt,
+      memberDecisions: request.memberDecisions ?? [],
+    };
+  }
+
+  /** Boshliq tasdiqlagach yuborilgan hujjatlarni PDF ga aylantiradi */
+  async convertSubmittedDocumentsToPdf(request: PurchaseRequestDocument) {
+    const source = this.buildDocumentSourceFromRequest(request);
+    const applicantQrUrl = request.applicantVerificationToken
+      ? this.buildApplicantQrUrl(request.applicantVerificationToken)
+      : undefined;
+
+    const [bildirgiBuffer, kelishuvBuffer] = await Promise.all([
+      this.documentService.generatePdf(source, { applicantQrUrl }),
+      this.commissionDocumentService.generatePdf(source),
+    ]);
+
+    const targetDir = this.getRequestDocumentsDir(request.id);
+    await mkdir(targetDir, { recursive: true });
+
+    const bildirgiStored = 'bildirgi.pdf';
+    const kelishuvStored = 'kelishuv.pdf';
+
+    await Promise.all([
+      writeFile(path.join(targetDir, bildirgiStored), bildirgiBuffer),
+      writeFile(path.join(targetDir, kelishuvStored), kelishuvBuffer),
+    ]);
+
+    return {
+      bildirgi: {
+        label: 'Bildirgi',
+        storedName: bildirgiStored,
+        originalName: `bildirgi-${request.requestCode}.pdf`,
+        mimeType: 'application/pdf',
+        size: bildirgiBuffer.length,
+      },
+      kelishuv: {
+        label: 'Kelishuv varaqasi',
+        storedName: kelishuvStored,
+        originalName: `kelishuv-${request.requestCode}.pdf`,
+        mimeType: 'application/pdf',
+        size: kelishuvBuffer.length,
+      },
+    };
   }
 }

@@ -21,6 +21,10 @@ export class PurchaseRequestSession {
   @Prop({ type: Types.ObjectId, ref: 'PurchaseRequest' })
   editingRequestId?: Types.ObjectId;
 
+  /** Hujjatlar va yuborish uchun oldindan band qilingan ariza ID */
+  @Prop({ trim: true })
+  reservedRequestCode?: string;
+
   @Prop({ trim: true, default: '' })
   title!: string;
 
