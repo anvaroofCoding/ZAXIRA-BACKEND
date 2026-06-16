@@ -1,6 +1,5 @@
 import { Type } from 'class-transformer';
 import {
-  IsEnum,
   IsInt,
   IsOptional,
   IsString,
@@ -8,31 +7,26 @@ import {
   Max,
   Min,
 } from 'class-validator';
-import { PurchaseRequestStatus } from '../enums/purchase-request-status.enum';
 
 const DATE_ONLY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 
-export class QueryPurchaseRequestsDto {
+export class QueryWarehouseImportsDto {
   @IsOptional()
   @Type(() => Number)
   @IsInt()
   @Min(1)
-  page?: number;
+  page?: number = 1;
 
   @IsOptional()
   @Type(() => Number)
   @IsInt()
   @Min(1)
   @Max(100)
-  limit?: number;
+  limit?: number = 10;
 
   @IsOptional()
   @IsString()
   search?: string;
-
-  @IsOptional()
-  @IsEnum(PurchaseRequestStatus)
-  status?: PurchaseRequestStatus;
 
   @IsOptional()
   @IsString()

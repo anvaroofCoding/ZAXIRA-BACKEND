@@ -138,6 +138,21 @@ export const hasPageAccess = (
   return Boolean(permissions?.[path]?.access);
 };
 
+export const hasAnyPageAccess = (
+  permissions: UserPermissionsMap | undefined,
+  paths: readonly string[],
+  isSuperAdmin: boolean,
+): boolean => {
+  if (isSuperAdmin) {
+    return true;
+  }
+
+  return paths.some((path) => hasPageAccess(permissions, path, false));
+};
+
+export const isAccessOnlyPage = (path: string): boolean =>
+  PERMISSION_ACTION_KEYS.every((key) => isPageActionDisabled(path, key));
+
 export const hasPageAction = (
   permissions: UserPermissionsMap | undefined,
   path: string,

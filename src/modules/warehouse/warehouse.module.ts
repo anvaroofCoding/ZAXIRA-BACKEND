@@ -17,7 +17,16 @@ import {
   WarehouseFixedAsset,
   WarehouseFixedAssetSchema,
 } from './schemas/warehouse-fixed-asset.schema';
+import {
+  WarehouseImport,
+  WarehouseImportSchema,
+} from './schemas/warehouse-import.schema';
+import {
+  WarehouseImportSession,
+  WarehouseImportSessionSchema,
+} from './schemas/warehouse-import-session.schema';
 import { WarehouseController } from './warehouse.controller';
+import { WarehouseImportService } from './warehouse-import.service';
 import { WarehousePricingService } from './warehouse-pricing.service';
 import { WarehouseService } from './warehouse.service';
 import {
@@ -40,6 +49,11 @@ import {
       { name: WarehouseInventory.name, schema: WarehouseInventorySchema },
       { name: WarehouseExpense.name, schema: WarehouseExpenseSchema },
       { name: WarehouseFixedAsset.name, schema: WarehouseFixedAssetSchema },
+      { name: WarehouseImport.name, schema: WarehouseImportSchema },
+      {
+        name: WarehouseImportSession.name,
+        schema: WarehouseImportSessionSchema,
+      },
       { name: WarehouseDispatch.name, schema: WarehouseDispatchSchema },
       { name: Sequence.name, schema: SequenceSchema },
       { name: Structure.name, schema: StructureSchema },
@@ -47,7 +61,7 @@ import {
     UsersModule,
   ],
   controllers: [WarehouseController],
-  providers: [WarehouseService, WarehousePricingService],
-  exports: [WarehouseService, WarehousePricingService],
+  providers: [WarehouseService, WarehouseImportService, WarehousePricingService],
+  exports: [WarehouseService, WarehouseImportService, WarehousePricingService],
 })
 export class WarehouseModule {}

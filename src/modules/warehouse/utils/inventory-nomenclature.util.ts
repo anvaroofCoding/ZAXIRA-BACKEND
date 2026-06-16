@@ -32,11 +32,14 @@ export const buildInventoryItemKey = (
 export const resolveInventoryBarcodeForStorage = (
   name: string,
   characteristics: string,
-  nomenclatureCode?: string,
+  existingBarcode?: string | null,
+  nomenclatureCode?: string | null,
 ) => {
-  const code = normalizeNomenclatureCode(nomenclatureCode ?? '');
-  if (code) {
-    return code;
+  const stored = String(existingBarcode ?? '').trim();
+  const nomenclature = normalizeNomenclatureCode(nomenclatureCode ?? '');
+
+  if (stored && (!nomenclature || stored !== nomenclature)) {
+    return stored;
   }
 
   return computeWarehouseBarcode(name, characteristics);

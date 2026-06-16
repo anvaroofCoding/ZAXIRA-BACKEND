@@ -16,6 +16,7 @@ export default () => ({
     password: process.env.SUPER_ADMIN_PASSWORD ?? '123123',
   },
   corsOrigin: process.env.CORS_ORIGIN ?? 'http://localhost:5173',
+  /** QR kodlar va ochiq havolalar uchun frontend domeni (APP_PUBLIC_URL). */
   appPublicUrl: process.env.APP_PUBLIC_URL ?? 'http://localhost:5173',
   throttle: {
     ttl: parseInt(process.env.THROTTLE_TTL ?? '60000', 10),

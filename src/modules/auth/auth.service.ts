@@ -18,7 +18,7 @@ import { DeviceMeta, UserDevicesService } from './user-devices.service';
 @Injectable()
 export class AuthService {
   private static readonly MAX_FAILED_LOGIN_ATTEMPTS = 5;
-  private static readonly LOCK_DURATION_MS = 60 * 60 * 1000;
+  private static readonly LOCK_DURATION_MS = 30 * 1000;
 
   constructor(
     private readonly usersService: UsersService,
@@ -85,7 +85,7 @@ export class AuthService {
 
         throw new ForbiddenException({
           message:
-            'Profil 60 daqiqaga bloklandi. Blok muddati tugagach qayta urinib ko‘ring',
+            'Profil 30 soniyaga bloklandi. Blok muddati tugagach qayta urinib ko‘ring',
           lockUntil: lockUntil.toISOString(),
           remainingSeconds: this.getRemainingSeconds(lockUntil),
         });

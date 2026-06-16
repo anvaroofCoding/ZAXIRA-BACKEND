@@ -10,11 +10,13 @@ import { UserRole } from '../../common/enums/user-role.enum';
 import { isSuperAdminRole } from '../../common/utils/super-admin.util';
 import { UsersService } from '../users/users.service';
 import {
+  ALL_WAREHOUSES_OVERVIEW_PAGE_PATHS,
   TRANSFER_RECEIPT_PAGE_PATH,
   WAREHOUSE_RECEIPT_PAGE_PATH,
 } from '../users/constants/disabled-page-actions';
 import { UserPermissionsMap } from '../users/types/page-permission.type';
 import {
+  hasAnyPageAccess,
   hasPageAccess,
   hasPageAction,
   normalizePermissions,
@@ -61,6 +63,10 @@ import {
   WarehouseFixedAsset,
   WarehouseFixedAssetDocument,
 } from './schemas/warehouse-fixed-asset.schema';
+import {
+  WarehouseImport,
+  WarehouseImportDocument,
+} from './schemas/warehouse-import.schema';
 import {
   Structure,
   StructureDocument,
@@ -119,6 +125,8 @@ export class WarehouseService {
     private readonly expenseModel: Model<WarehouseExpenseDocument>,
     @InjectModel(WarehouseFixedAsset.name)
     private readonly fixedAssetModel: Model<WarehouseFixedAssetDocument>,
+    @InjectModel(WarehouseImport.name)
+    private readonly importModel: Model<WarehouseImportDocument>,
     @InjectModel(Sequence.name)
     private readonly sequenceModel: Model<SequenceDocument>,
     @InjectModel(Structure.name)
@@ -185,22 +193,31 @@ export class WarehouseService {
       }
 
       item.receiptNomenclatureCode = code;
-      item.barcode = code;
       item.itemKey = buildInventoryItemKey(
         item.name,
         item.characteristics,
         code,
       );
+      const backfillSet: Record<string, string> = {
+        receiptNomenclatureCode: code,
+        itemKey: item.itemKey,
+      };
+      const resolvedBarcode = resolveInventoryBarcode(
+        item.name,
+        item.characteristics,
+        item.barcode,
+        code,
+      );
+      if (item.barcode?.trim() !== resolvedBarcode) {
+        item.barcode = resolvedBarcode;
+        backfillSet.barcode = resolvedBarcode;
+      }
       backfillOps.push(
         this.inventoryModel
           .updateOne(
             { _id: item._id },
             {
-              $set: {
-                receiptNomenclatureCode: code,
-                barcode: code,
-                itemKey: item.itemKey,
-              },
+              $set: backfillSet,
             },
           )
           .exec(),
@@ -623,9 +640,15 @@ export class WarehouseService {
         item.name,
         item.characteristics,
         item.barcode,
+        item.receiptNomenclatureCode,
       );
 
-      if (!item.barcode?.trim()) {
+      const storedBarcode = item.barcode?.trim() || '';
+      const nomenclature = item.receiptNomenclatureCode?.trim() || '';
+      const needsBarcodePersist =
+        !storedBarcode || (nomenclature && storedBarcode === nomenclature);
+
+      if (needsBarcodePersist) {
         updates.push(
           this.inventoryModel
             .updateOne({ _id: item._id }, { $set: { barcode } })
@@ -670,7 +693,37 @@ export class WarehouseService {
     };
   }
 
-  async listAllWarehousesOverview() {
+  private async assertCanViewAllWarehousesOverview(
+    userId: string,
+    role?: UserRole,
+  ) {
+    if (this.isPrivilegedRole(role) || isSuperAdminRole(role)) {
+      return;
+    }
+
+    const user = await this.usersService.findById(userId);
+    if (!user?.isActive) {
+      throw new ForbiddenException('Boshqa omborlarni ko‘rishga ruxsat yo‘q');
+    }
+
+    const permissions = normalizePermissions(
+      user.permissions as UserPermissionsMap | undefined,
+    );
+
+    if (
+      !hasAnyPageAccess(
+        permissions,
+        ALL_WAREHOUSES_OVERVIEW_PAGE_PATHS,
+        false,
+      )
+    ) {
+      throw new ForbiddenException('Boshqa omborlarni ko‘rishga ruxsat yo‘q');
+    }
+  }
+
+  async listAllWarehousesOverview(userId: string, role?: UserRole) {
+    await this.assertCanViewAllWarehousesOverview(userId, role);
+
     const rows = await this.locationModel
       .aggregate<{
         _id: Types.ObjectId;
@@ -836,23 +889,48 @@ export class WarehouseService {
 
     await this.enrichInventoryNomenclature(structureId, items);
 
-    return {
-      location: { id: location.id, name: location.name },
-      items: items.map((item) => ({
+    const barcodeUpdates: Promise<unknown>[] = [];
+    const mappedItems = items.map((item) => {
+      const barcode = resolveInventoryBarcode(
+        item.name,
+        item.characteristics,
+        item.barcode,
+        item.receiptNomenclatureCode,
+      );
+
+      const storedBarcode = item.barcode?.trim() || '';
+      const nomenclature = item.receiptNomenclatureCode?.trim() || '';
+      const needsBarcodePersist =
+        !storedBarcode || (nomenclature && storedBarcode === nomenclature);
+
+      if (needsBarcodePersist) {
+        barcodeUpdates.push(
+          this.inventoryModel
+            .updateOne({ _id: item._id }, { $set: { barcode } })
+            .exec(),
+        );
+      }
+
+      return {
         id: item.id,
         name: item.name,
         characteristics: item.characteristics,
-        barcode: resolveInventoryBarcode(
-          item.name,
-          item.characteristics,
-          item.barcode,
-        ),
+        barcode,
         nomenclatureCode: mapNomenclatureCode(item.receiptNomenclatureCode),
         quantity: item.quantity,
         lastReceiptAt: item.lastReceiptAt ?? null,
         createdAt: item.createdAt,
         updatedAt: item.updatedAt,
-      })),
+      };
+    });
+
+    if (barcodeUpdates.length) {
+      await Promise.allSettled(barcodeUpdates);
+    }
+
+    return {
+      location: { id: location.id, name: location.name },
+      items: mappedItems,
       total,
       page,
       limit,
@@ -903,7 +981,12 @@ export class WarehouseService {
         id: found.id,
         name: found.name,
         characteristics: found.characteristics,
-        barcode: found.barcode,
+        barcode: resolveInventoryBarcode(
+          found.name,
+          found.characteristics,
+          found.barcode,
+          found.receiptNomenclatureCode,
+        ),
         nomenclatureCode: mapNomenclatureCode(found.receiptNomenclatureCode),
         quantity: found.quantity,
       };
@@ -921,11 +1004,19 @@ export class WarehouseService {
       .exec();
 
     for (const item of candidates) {
-      const computed =
-        item.barcode?.trim() ||
-        computeWarehouseBarcode(item.name, item.characteristics);
+      const computed = resolveInventoryBarcode(
+        item.name,
+        item.characteristics,
+        item.barcode,
+        item.receiptNomenclatureCode,
+      );
 
-      if (!item.barcode?.trim()) {
+      const storedBarcode = item.barcode?.trim() || '';
+      const nomenclature = item.receiptNomenclatureCode?.trim() || '';
+      const needsBarcodePersist =
+        !storedBarcode || (nomenclature && storedBarcode === nomenclature);
+
+      if (needsBarcodePersist) {
         await this.inventoryModel
           .updateOne({ _id: item._id }, { $set: { barcode: computed } })
           .exec();
@@ -2028,6 +2119,7 @@ export class WarehouseService {
       inventory.name,
       inventory.characteristics,
       inventory.barcode,
+      inventory.receiptNomenclatureCode,
     );
     const structureObjectId = new Types.ObjectId(structureId);
     const locationObjectId = new Types.ObjectId(locationId);
@@ -2041,7 +2133,8 @@ export class WarehouseService {
         | 'expense'
         | 'fixed_asset'
         | 'fixed_asset_return'
-        | 'fixed_asset_discard';
+        | 'fixed_asset_discard'
+        | 'import';
       title: string;
       description: string;
       quantity?: number;
@@ -2052,7 +2145,7 @@ export class WarehouseService {
 
     const events: HistoryEvent[] = [];
 
-    const [inboundDispatches, outboundDispatches, expenses, fixedAssets] =
+    const [inboundDispatches, outboundDispatches, expenses, fixedAssets, imports] =
       await Promise.all([
         this.dispatchModel
           .find({
@@ -2098,6 +2191,19 @@ export class WarehouseService {
           .select(
             'expenseCode serviceStructureName quantity status returnedAt discardedAt discardReason createdAt',
           )
+          .sort({ createdAt: 1 })
+          .exec(),
+        this.importModel
+          .find({
+            structureId: structureObjectId,
+            items: {
+              $elemMatch: {
+                locationId: locationObjectId,
+                itemKey,
+              },
+            },
+          })
+          .select('code items comment createdAt')
           .sort({ createdAt: 1 })
           .exec(),
       ]);
@@ -2191,6 +2297,33 @@ export class WarehouseService {
         linkPath: `/omborlar/chiqim-tarixi?chiqim=${encodeURIComponent(expense.code)}&structureId=${structureId}`,
         linkLabel: 'Chiqim tafsiloti',
       });
+    }
+
+    for (const importRecord of imports) {
+      for (const [itemIndex, item] of (importRecord.items ?? []).entries()) {
+        if (String(item.locationId ?? '') !== String(locationObjectId)) {
+          continue;
+        }
+
+        if (item.itemKey !== itemKey) {
+          continue;
+        }
+
+        events.push({
+          id: `import-${importRecord.id}-${itemIndex}`,
+          type: 'import',
+          title: 'Import qilingan',
+          description: `${importRecord.code}${
+            importRecord.comment?.trim()
+              ? ` · ${importRecord.comment.trim()}`
+              : ''
+          }`,
+          quantity: item.quantity,
+          occurredAt: importRecord.createdAt ?? new Date(),
+          linkPath: `/omborlar/tavar-import-qilish?import=${importRecord.id}`,
+          linkLabel: 'Import tafsiloti',
+        });
+      }
     }
 
     for (const asset of fixedAssets) {

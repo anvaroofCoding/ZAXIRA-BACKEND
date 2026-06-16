@@ -31,14 +31,6 @@ export class ResubmitPurchaseRequestDto {
   @IsString()
   commissionAgreementText?: string;
 
-  @IsArray()
-  @ArrayMinSize(1)
-  @IsMongoId({ each: true })
-  commissionMemberIds!: string[];
-
-  @IsMongoId()
-  bossId!: string;
-
   /** `boss` — faqat boshliqqa; `commission` — rad etgan a’zolarga */
   @IsOptional()
   @IsIn(['boss', 'commission'])
@@ -46,10 +38,21 @@ export class ResubmitPurchaseRequestDto {
 
   /** Rad etgan komissiya a’zolaridan qaysilariga qayta kelishish yuboriladi */
   @ValidateIf((dto) => dto.resubmitTarget !== 'boss')
+  @IsOptional()
   @IsArray()
   @ArrayMinSize(1)
   @IsMongoId({ each: true })
   resubmitToMemberIds?: string[];
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMinSize(1)
+  @IsMongoId({ each: true })
+  commissionMemberIds?: string[];
+
+  @IsOptional()
+  @IsMongoId()
+  bossId?: string;
 
   @IsOptional()
   @IsEnum(PurchasePeriodType)

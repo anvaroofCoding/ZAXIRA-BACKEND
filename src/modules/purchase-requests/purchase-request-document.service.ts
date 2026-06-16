@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import * as path from 'node:path';
 import PDFDocument from 'pdfkit';
+import { buildPurchaseRequestBildirgiPdfPublicUrl } from '../../common/utils/public-url.util';
 import { buildQrPngBuffer } from '../../common/utils/qr-code.util';
 import { UsersService } from '../users/users.service';
 import { ApprovalDecision } from './enums/approval-decision.enum';
@@ -75,10 +76,10 @@ export class PurchaseRequestDocumentService {
   }
 
   private buildPublicPdfUrl(request: PurchaseRequestDocumentSource) {
-    const apiPublicUrl = this.configService
-      .get<string>('apiPublicUrl', 'http://localhost:8000/api')
-      .replace(/\/$/, '');
-    return `${apiPublicUrl}/public/purchase-requests/${request.id}/pdf`;
+    return buildPurchaseRequestBildirgiPdfPublicUrl(
+      this.configService,
+      String(request.id),
+    );
   }
 
   private getOrganizationNameLatin() {

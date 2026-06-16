@@ -8,6 +8,7 @@ import { randomBytes } from 'node:crypto';
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import { Types } from 'mongoose';
+import { buildPurchaseRequestVerifyPublicUrl } from '../../common/utils/public-url.util';
 import { UsersService } from '../users/users.service';
 import { PurchaseRequestCommissionDocumentService } from './purchase-request-commission-document.service';
 import { PurchaseRequestDocumentService } from './purchase-request-document.service';
@@ -55,10 +56,7 @@ export class PurchaseRequestSessionDocumentsService {
   }
 
   buildApplicantQrUrl(token: string) {
-    const apiPublicUrl = this.configService
-      .get<string>('apiPublicUrl', 'http://localhost:8000/api')
-      .replace(/\/$/, '');
-    return `${apiPublicUrl}/public/purchase-requests/verify/${token}`;
+    return buildPurchaseRequestVerifyPublicUrl(this.configService, token);
   }
 
   buildDocumentDownloadUrl(

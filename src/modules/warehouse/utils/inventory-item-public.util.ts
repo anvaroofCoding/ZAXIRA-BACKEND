@@ -1,4 +1,4 @@
-import { computeWarehouseBarcode } from './warehouse-barcode.util';
+import { resolveInventoryBarcodeForStorage } from './inventory-nomenclature.util';
 
 export function mapNomenclatureCode(
   receiptNomenclatureCode?: string | null,
@@ -10,8 +10,14 @@ export function resolveInventoryBarcode(
   name: string,
   characteristics: string,
   barcode?: string | null,
+  receiptNomenclatureCode?: string | null,
 ): string {
-  return barcode?.trim() || computeWarehouseBarcode(name, characteristics);
+  return resolveInventoryBarcodeForStorage(
+    name,
+    characteristics,
+    barcode,
+    receiptNomenclatureCode,
+  );
 }
 
 export function buildInventorySearchOr(search: string) {

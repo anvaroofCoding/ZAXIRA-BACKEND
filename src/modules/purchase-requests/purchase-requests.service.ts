@@ -953,7 +953,26 @@ export class PurchaseRequestsService implements OnModuleInit {
     request: PurchaseRequestDocument,
     dto: ResubmitPurchaseRequestDto,
   ) {
-    if (dto.commissionMemberIds.includes(dto.bossId)) {
+    const commissionMemberIds =
+      dto.commissionMemberIds?.length
+        ? dto.commissionMemberIds
+        : (request.commissionMembers ?? []).map((member) => String(member.userId));
+
+    const bossId = dto.bossId?.trim()
+      ? dto.bossId
+      : request.boss?.userId
+        ? String(request.boss.userId)
+        : '';
+
+    if (!commissionMemberIds.length) {
+      throw new BadRequestException('Kamida bitta komissiya a’zosini tanlang');
+    }
+
+    if (!bossId) {
+      throw new BadRequestException('Boshliqni tanlang');
+    }
+
+    if (commissionMemberIds.includes(bossId)) {
       throw new BadRequestException(
         'Boshliq komissiya a’zolari ro‘yxatida bo‘lmasligi kerak',
       );
@@ -963,9 +982,9 @@ export class PurchaseRequestsService implements OnModuleInit {
     const purchasePeriod = normalizePurchasePeriodFields(dto);
 
     request.commissionMembers = await this.buildUserSnapshots(
-      dto.commissionMemberIds,
+      commissionMemberIds,
     );
-    const [boss] = await this.buildUserSnapshots([dto.bossId]);
+    const [boss] = await this.buildUserSnapshots([bossId]);
     request.boss = boss;
     request.items = this.normalizeRequestItems(dto.items);
     request.comment = dto.comment?.trim() ?? '';
@@ -1698,6 +1717,22 @@ export class PurchaseRequestsService implements OnModuleInit {
     };
   }
 
+  private buildAwaitingWarehouseDispatchMatch(): Record<string, unknown> {
+    return {
+      status: PurchaseRequestStatus.PURCHASED,
+      'items.isPurchased': true,
+    };
+  }
+
+  private buildPurchasingInboxQueueMatch(): Record<string, unknown> {
+    return {
+      $or: [
+        this.buildPendingPurchaseItemElemMatch(),
+        this.buildAwaitingWarehouseDispatchMatch(),
+      ],
+    };
+  }
+
   private canPurchasePendingItems(request: PurchaseRequestDocument) {
     return (
       this.countPendingPurchaseItems(request) > 0 &&
@@ -1825,19 +1860,33 @@ export class PurchaseRequestsService implements OnModuleInit {
     userId: string,
     role?: UserRole,
   ): Record<string, unknown> {
-    const filter: Record<string, unknown> = {};
+    const clauses: Record<string, unknown>[] = [];
 
     if (!isSuperAdminRole(role)) {
-      filter.createdById = new Types.ObjectId(userId);
+      clauses.push({ createdById: new Types.ObjectId(userId) });
+    }
+
+    if (query.status) {
+      clauses.push({ status: query.status });
     }
 
     const term = query.search?.trim();
 
     if (term) {
-      filter.$or = this.buildSearchOr(term);
+      clauses.push({ $or: this.buildSearchOr(term) });
     }
 
-    return filter;
+    appendDateRangeClause(clauses, 'createdAt', query.dateFrom, query.dateTo);
+
+    if (!clauses.length) {
+      return {};
+    }
+
+    if (clauses.length === 1) {
+      return clauses[0];
+    }
+
+    return { $and: clauses };
   }
 
   async findHistoryEventsPaginated(
@@ -2019,12 +2068,11 @@ export class PurchaseRequestsService implements OnModuleInit {
     };
   }
 
-  private buildApprovalInboxFilter(
-    query: QueryApprovalInboxDto,
+  private buildApprovalInboxAccessClauses(
     userId: string,
     role?: UserRole,
     viewerLogin?: string,
-  ): Record<string, unknown> {
+  ): Record<string, unknown>[] {
     const clauses: Record<string, unknown>[] = [];
 
     if (!isSuperAdminRole(role)) {
@@ -2047,6 +2095,33 @@ export class PurchaseRequestsService implements OnModuleInit {
       clauses.push({ createdById: { $ne: userObjectId } });
     }
 
+    return clauses;
+  }
+
+  private buildApprovalInboxFilter(
+    query: QueryApprovalInboxDto,
+    userId: string,
+    role?: UserRole,
+    viewerLogin?: string,
+  ): Record<string, unknown> {
+    const clauses = this.buildApprovalInboxAccessClauses(
+      userId,
+      role,
+      viewerLogin,
+    );
+
+    if (query.structureId && Types.ObjectId.isValid(query.structureId)) {
+      const structureObjectId = new Types.ObjectId(query.structureId);
+      clauses.push({
+        $or: [
+          { 'applicantStructure.structureId': structureObjectId },
+          { 'applicantStructure.structureId': query.structureId },
+        ],
+      });
+    }
+
+    appendDateRangeClause(clauses, 'createdAt', query.dateFrom, query.dateTo);
+
     const term = query.search?.trim();
 
     if (term) {
@@ -2062,6 +2137,51 @@ export class PurchaseRequestsService implements OnModuleInit {
     }
 
     return { $and: clauses };
+  }
+
+  private async listApprovalInboxStructureFilters(
+    userId: string,
+    role?: UserRole,
+    viewerLogin?: string,
+  ) {
+    const accessClauses = this.buildApprovalInboxAccessClauses(
+      userId,
+      role,
+      viewerLogin,
+    );
+    const matchClauses: Record<string, unknown>[] = [
+      ...accessClauses,
+      { 'applicantStructure.structureId': { $exists: true, $ne: null } },
+    ];
+    const matchStage =
+      matchClauses.length === 1 ? matchClauses[0] : { $and: matchClauses };
+
+    const rows = await this.purchaseRequestModel
+      .aggregate<{
+        _id: Types.ObjectId;
+        shortName: string;
+        fullName: string;
+        requestCount: number;
+      }>([
+        { $match: matchStage },
+        {
+          $group: {
+            _id: '$applicantStructure.structureId',
+            shortName: { $first: '$applicantStructure.shortName' },
+            fullName: { $first: '$applicantStructure.fullName' },
+            requestCount: { $sum: 1 },
+          },
+        },
+        { $sort: { shortName: 1 } },
+      ])
+      .exec();
+
+    return rows.map((row) => ({
+      id: String(row._id),
+      shortName: row.shortName?.trim() || '—',
+      fullName: row.fullName?.trim() || row.shortName?.trim() || 'Noma’lum tuzilma',
+      requestCount: row.requestCount,
+    }));
   }
 
   async findAllPaginated(
@@ -2121,7 +2241,7 @@ export class PurchaseRequestsService implements OnModuleInit {
     const filter = this.buildApprovalInboxFilter(query, userId, role, viewerLogin);
     const skip = (page - 1) * limit;
 
-    const [items, total] = await Promise.all([
+    const [items, total, structureFilters] = await Promise.all([
       this.purchaseRequestModel
         .find(filter)
         .sort({ createdAt: -1 })
@@ -2129,6 +2249,7 @@ export class PurchaseRequestsService implements OnModuleInit {
         .limit(limit)
         .exec(),
       this.purchaseRequestModel.countDocuments(filter).exec(),
+      this.listApprovalInboxStructureFilters(userId, role, viewerLogin),
     ]);
 
     const totalPages = Math.max(1, Math.ceil(total / limit));
@@ -2146,6 +2267,7 @@ export class PurchaseRequestsService implements OnModuleInit {
       page,
       limit,
       totalPages,
+      structureFilters,
     };
   }
 
@@ -2266,7 +2388,6 @@ export class PurchaseRequestsService implements OnModuleInit {
     return [
       PurchaseRequestStatus.PURCHASING,
       PurchaseRequestStatus.PURCHASED,
-      PurchaseRequestStatus.WAREHOUSE_IN_TRANSIT,
     ];
   }
 
@@ -2282,7 +2403,7 @@ export class PurchaseRequestsService implements OnModuleInit {
           $match: {
             status: { $in: this.purchasingInboxStatuses() },
             'applicantStructure.structureId': { $exists: true, $ne: null },
-            ...this.buildPendingPurchaseItemElemMatch(),
+            ...this.buildPurchasingInboxQueueMatch(),
           },
         },
         {
@@ -2314,7 +2435,7 @@ export class PurchaseRequestsService implements OnModuleInit {
           $in: this.purchasingInboxStatuses(),
         },
       },
-      this.buildPendingPurchaseItemElemMatch(),
+      this.buildPurchasingInboxQueueMatch(),
     ];
 
     appendDateRangeClause(clauses, 'updatedAt', query.dateFrom, query.dateTo);
@@ -3623,6 +3744,7 @@ export class PurchaseRequestsService implements OnModuleInit {
       comment,
       createdAt: now,
     });
+    request.markModified('history');
 
     await request.save();
 
@@ -3988,9 +4110,11 @@ export class PurchaseRequestsService implements OnModuleInit {
   }
 
   normalizeResubmitPayload(body: Record<string, unknown>): ResubmitPurchaseRequestDto {
-    const updateDto = this.normalizeUpdatePayload(body);
+    const sessionDto = this.normalizeSessionPayload(body);
     const resubmitTarget = body.resubmitTarget === 'boss' ? 'boss' : 'commission';
-    const resubmitToMemberIds = (body.resubmitToMemberIds ?? [])
+    const resubmitToMemberIds = (
+      Array.isArray(body.resubmitToMemberIds) ? body.resubmitToMemberIds : []
+    )
       .map((value) => String(value))
       .filter((value) => /^[a-f\d]{24}$/i.test(value));
 
@@ -4000,12 +4124,42 @@ export class PurchaseRequestsService implements OnModuleInit {
       );
     }
 
-    return {
-      ...updateDto,
+    const items = sessionDto.items ?? [];
+
+    if (!items.length) {
+      throw new BadRequestException('Kamida bitta tovar kiriting');
+    }
+
+    const purchasePeriodType = resolvePurchasePeriodType(
+      sessionDto.purchasePeriodType,
+    );
+
+    const dto: ResubmitPurchaseRequestDto = {
+      items: items.map((item) => ({
+        name: item.name?.trim() || '—',
+        characteristics: item.characteristics?.trim() || '—',
+        quantity: item.quantity ?? 1,
+        unit: item.unit?.trim() || '—',
+        manufacturingCountry: item.manufacturingCountry?.trim() || '—',
+      })),
+      comment: sessionDto.comment ?? '',
+      commissionAgreementText: sessionDto.commissionAgreementText ?? '',
+      purchasePeriodType,
+      purchasePeriodYear: sessionDto.purchasePeriodYear,
+      purchasePeriodQuarter: sessionDto.purchasePeriodQuarter,
+      purchasePeriodMonth: sessionDto.purchasePeriodMonth,
       resubmitTarget,
       resubmitToMemberIds:
         resubmitTarget === 'boss' ? undefined : resubmitToMemberIds,
+      ...(sessionDto.commissionMemberIds?.length
+        ? { commissionMemberIds: sessionDto.commissionMemberIds }
+        : {}),
+      ...(sessionDto.bossId ? { bossId: sessionDto.bossId } : {}),
     };
+
+    validatePurchasePeriod(dto);
+
+    return dto;
   }
 
   async saveActiveSession(

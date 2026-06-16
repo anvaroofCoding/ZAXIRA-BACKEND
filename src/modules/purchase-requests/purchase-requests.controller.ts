@@ -127,12 +127,36 @@ export class PurchaseRequestsController {
     @Query('page') page: string | undefined,
     @Query('limit') limit: string | undefined,
     @Query('search') search: string | undefined,
+    @Query('status') status: string | undefined,
+    @Query('dateFrom') dateFrom: string | undefined,
+    @Query('dateTo') dateTo: string | undefined,
     @CurrentUser() user: JwtPayload,
   ) {
     const query = new QueryPurchaseRequestsDto();
     query.page = Math.max(1, Number(page) || 1);
     query.limit = Math.min(100, Math.max(1, Number(limit) || 10));
     query.search = search?.trim() || undefined;
+
+    if (
+      status &&
+      Object.values(PurchaseRequestStatus).includes(
+        status as PurchaseRequestStatus,
+      )
+    ) {
+      query.status = status as PurchaseRequestStatus;
+    }
+
+    const dateOnlyPattern = /^\d{4}-\d{2}-\d{2}$/;
+    const normalizedDateFrom = dateFrom?.trim();
+    const normalizedDateTo = dateTo?.trim();
+    query.dateFrom =
+      normalizedDateFrom && dateOnlyPattern.test(normalizedDateFrom)
+        ? normalizedDateFrom
+        : undefined;
+    query.dateTo =
+      normalizedDateTo && dateOnlyPattern.test(normalizedDateTo)
+        ? normalizedDateTo
+        : undefined;
 
     return this.purchaseRequestsService.findAllPaginated(
       query,
@@ -236,12 +260,28 @@ export class PurchaseRequestsController {
     @Query('page') page: string | undefined,
     @Query('limit') limit: string | undefined,
     @Query('search') search: string | undefined,
+    @Query('dateFrom') dateFrom: string | undefined,
+    @Query('dateTo') dateTo: string | undefined,
+    @Query('structureId') structureId: string | undefined,
     @CurrentUser() user: JwtPayload,
   ) {
     const query = new QueryApprovalInboxDto();
     query.page = Math.max(1, Number(page) || 1);
     query.limit = Math.min(100, Math.max(1, Number(limit) || 10));
     query.search = search?.trim() || undefined;
+
+    const dateOnlyPattern = /^\d{4}-\d{2}-\d{2}$/;
+    const normalizedDateFrom = dateFrom?.trim();
+    const normalizedDateTo = dateTo?.trim();
+    query.dateFrom =
+      normalizedDateFrom && dateOnlyPattern.test(normalizedDateFrom)
+        ? normalizedDateFrom
+        : undefined;
+    query.dateTo =
+      normalizedDateTo && dateOnlyPattern.test(normalizedDateTo)
+        ? normalizedDateTo
+        : undefined;
+    query.structureId = structureId?.trim() || undefined;
 
     return this.purchaseRequestsService.findApprovalInboxPaginated(
       query,

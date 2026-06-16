@@ -20,12 +20,18 @@ import { QueryWarehouseExpensesDto } from './dto/query-warehouse-expenses.dto';
 import { QueryWarehouseFixedAssetsDto } from './dto/query-warehouse-fixed-assets.dto';
 import { QueryWarehouseInventoryDto } from './dto/query-warehouse-inventory.dto';
 import { DiscardWarehouseFixedAssetDto } from './dto/discard-warehouse-fixed-asset.dto';
+import { QueryWarehouseImportsDto } from './dto/query-warehouse-imports.dto';
+import { SaveWarehouseImportSessionDto } from './dto/save-warehouse-import-session.dto';
+import { WarehouseImportService } from './warehouse-import.service';
 import { WarehouseService } from './warehouse.service';
 
 @Controller('warehouse')
 @UseGuards(JwtAuthGuard)
 export class WarehouseController {
-  constructor(private readonly warehouseService: WarehouseService) {}
+  constructor(
+    private readonly warehouseService: WarehouseService,
+    private readonly warehouseImportService: WarehouseImportService,
+  ) {}
 
   @Get('locations')
   listLocations(@CurrentUser() user: JwtPayload) {
@@ -72,8 +78,8 @@ export class WarehouseController {
   }
 
   @Get('all/overview')
-  listAllWarehousesOverview() {
-    return this.warehouseService.listAllWarehousesOverview();
+  listAllWarehousesOverview(@CurrentUser() user: JwtPayload) {
+    return this.warehouseService.listAllWarehousesOverview(user.sub, user.role);
   }
 
   @Get('all/locations/:id/inventory')
@@ -218,5 +224,75 @@ export class WarehouseController {
       user.sub,
       user.role,
     );
+  }
+
+  @Get('imports')
+  listImports(
+    @Query() query: QueryWarehouseImportsDto,
+    @CurrentUser() user: JwtPayload,
+  ) {
+    return this.warehouseImportService.listImportsPaginated(
+      query,
+      user.sub,
+      user.role,
+    );
+  }
+
+  @Get('imports/active-sessions')
+  listImportActiveSessions(@CurrentUser() user: JwtPayload) {
+    return this.warehouseImportService.listActiveSessions(user.sub, user.role);
+  }
+
+  @Post('imports/active-sessions')
+  createImportActiveSession(@CurrentUser() user: JwtPayload) {
+    return this.warehouseImportService.createActiveSession(user.sub, user.role);
+  }
+
+  @Post('imports/active-sessions/:sessionId')
+  saveImportActiveSession(
+    @Param('sessionId', ParseMongoIdPipe) sessionId: string,
+    @Body() dto: SaveWarehouseImportSessionDto,
+    @CurrentUser() user: JwtPayload,
+  ) {
+    return this.warehouseImportService.saveActiveSession(
+      user.sub,
+      sessionId,
+      dto,
+      user.role,
+    );
+  }
+
+  @Post('imports/active-sessions/:sessionId/submit')
+  submitImportActiveSession(
+    @Param('sessionId', ParseMongoIdPipe) sessionId: string,
+    @Body() dto: SaveWarehouseImportSessionDto,
+    @CurrentUser() user: JwtPayload,
+  ) {
+    return this.warehouseImportService.submitActiveSession(
+      user.sub,
+      sessionId,
+      dto,
+      user.role,
+    );
+  }
+
+  @Delete('imports/active-sessions/:sessionId')
+  deleteImportActiveSession(
+    @Param('sessionId', ParseMongoIdPipe) sessionId: string,
+    @CurrentUser() user: JwtPayload,
+  ) {
+    return this.warehouseImportService.deleteActiveSession(
+      user.sub,
+      sessionId,
+      user.role,
+    );
+  }
+
+  @Get('imports/:id')
+  findImport(
+    @Param('id', ParseMongoIdPipe) id: string,
+    @CurrentUser() user: JwtPayload,
+  ) {
+    return this.warehouseImportService.findImportById(id, user.sub, user.role);
   }
 }

@@ -24,11 +24,14 @@ import { NotificationsEventsService } from '../notifications/notifications-event
 import { StructuresService } from '../structures/structures.service';
 import {
   TRANSFER_RECEIPT_PAGE_PATH,
+  WAREHOUSE_2D_TRANSFER_VIEW_PAGE_PATHS,
   WAREHOUSE_RECEIPT_PAGE_PATH,
+  WAREHOUSES_2D_PAGE_PATH,
 } from '../users/constants/disabled-page-actions';
 import { UserPermissionsMap } from '../users/types/page-permission.type';
 import { UsersService } from '../users/users.service';
 import {
+  hasAnyPageAccess,
   hasPageAccess,
   normalizePermissions,
 } from '../users/utils/permissions.util';
@@ -190,14 +193,12 @@ export class WarehouseDispatchesService {
       item.characteristics,
       receiptNomenclatureCode,
     );
-    const barcode = receiptNomenclatureCode
-      ? resolveInventoryBarcodeForStorage(
-          item.name,
-          item.characteristics,
-          receiptNomenclatureCode,
-        )
-      : item.sourceBarcode?.trim() ||
-        computeWarehouseBarcode(item.name, item.characteristics);
+    const barcode = resolveInventoryBarcodeForStorage(
+      item.name,
+      item.characteristics,
+      item.sourceBarcode,
+      receiptNomenclatureCode,
+    );
     const structureObjectId = new Types.ObjectId(receiverStructureId);
     const matchFilters = this.buildReceiptInventoryMatchFilters(
       item,
@@ -217,7 +218,6 @@ export class WarehouseDispatchesService {
 
     if (receiptNomenclatureCode) {
       setFields.receiptNomenclatureCode = receiptNomenclatureCode;
-      setFields.barcode = receiptNomenclatureCode;
       setFields.itemKey = itemKey;
     }
 
@@ -233,6 +233,16 @@ export class WarehouseDispatchesService {
     let existing = await findExisting();
 
     if (existing) {
+      const resolvedBarcode = resolveInventoryBarcodeForStorage(
+        item.name,
+        item.characteristics,
+        existing.barcode,
+        receiptNomenclatureCode,
+      );
+      if (existing.barcode?.trim() !== resolvedBarcode) {
+        setFields.barcode = resolvedBarcode;
+      }
+
       await this.inventoryModel
         .updateOne(
           { _id: existing._id },
@@ -262,6 +272,16 @@ export class WarehouseDispatchesService {
         existing = await findExisting();
 
         if (existing) {
+          const resolvedBarcode = resolveInventoryBarcodeForStorage(
+            item.name,
+            item.characteristics,
+            existing.barcode,
+            receiptNomenclatureCode,
+          );
+          if (existing.barcode?.trim() !== resolvedBarcode) {
+            setFields.barcode = resolvedBarcode;
+          }
+
           await this.inventoryModel
             .updateOne(
               { _id: existing._id },
@@ -489,12 +509,61 @@ export class WarehouseDispatchesService {
     return null;
   }
 
+  private async userHasWarehouse2DAccess(userId: string, role?: UserRole) {
+    if (isSuperAdminRole(role)) {
+      return true;
+    }
+
+    const user = await this.usersService.findById(userId);
+    if (!user?.isActive) {
+      return false;
+    }
+
+    const permissions = normalizePermissions(
+      user.permissions as UserPermissionsMap | undefined,
+    );
+
+    return hasPageAccess(permissions, WAREHOUSES_2D_PAGE_PATH, false);
+  }
+
+  private async assertCanViewTransferHistory(userId: string, role?: UserRole) {
+    if (isSuperAdminRole(role)) {
+      return;
+    }
+
+    const user = await this.usersService.findById(userId);
+    if (!user?.isActive) {
+      throw new ForbiddenException('Transfer tarixini ko‘rishga ruxsat yo‘q');
+    }
+
+    const permissions = normalizePermissions(
+      user.permissions as UserPermissionsMap | undefined,
+    );
+
+    if (
+      !hasAnyPageAccess(
+        permissions,
+        WAREHOUSE_2D_TRANSFER_VIEW_PAGE_PATHS,
+        false,
+      )
+    ) {
+      throw new ForbiddenException('Transfer tarixini ko‘rishga ruxsat yo‘q');
+    }
+  }
+
   private async isDispatchVisibleToUser(
     dispatch: WarehouseDispatchDocument,
     userId: string,
     role?: UserRole,
   ): Promise<boolean> {
     if (isSuperAdminRole(role)) {
+      return true;
+    }
+
+    if (
+      this.isTransferDispatch(dispatch) &&
+      (await this.userHasWarehouse2DAccess(userId, role))
+    ) {
       return true;
     }
 
@@ -1166,6 +1235,10 @@ export class WarehouseDispatchesService {
     userId: string,
     role?: UserRole,
   ) {
+    if (query.source === 'transfer' && query.scope === 'history') {
+      await this.assertCanViewTransferHistory(userId, role);
+    }
+
     const page = query.page ?? 1;
     const limit = query.limit ?? 10;
     const skip = (page - 1) * limit;
@@ -1190,14 +1263,20 @@ export class WarehouseDispatchesService {
 
     if (!isSuperAdminRole(role)) {
       const structureId = await this.getUserStructureId(userId);
+      const canViewAllTransfersFor2D = await this.userHasWarehouse2DAccess(
+        userId,
+        role,
+      );
 
-      if (!structureId) {
+      if (!structureId && !canViewAllTransfersFor2D) {
         return { items: [], total: 0, page, limit, totalPages: 1 };
       }
 
       if (query.source === 'transfer' && query.scope === 'history') {
-        clauses.push(this.buildTransferHistoryStructureOr(structureId));
-      } else {
+        if (!canViewAllTransfersFor2D && structureId) {
+          clauses.push(this.buildTransferHistoryStructureOr(structureId));
+        }
+      } else if (structureId) {
         clauses.push({
           'targetStructure.structureId': new Types.ObjectId(structureId),
         });
