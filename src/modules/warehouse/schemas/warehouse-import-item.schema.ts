@@ -21,6 +21,12 @@ export class WarehouseImportItemEmbeddable {
   @Prop({ trim: true, default: '' })
   manufacturingCountry!: string;
 
+  @Prop({ trim: true, default: '' })
+  nomenclatureCode!: string;
+
+  @Prop({ min: 0, default: 0 })
+  unitPrice!: number;
+
   @Prop({ required: true, trim: true })
   itemKey!: string;
 }

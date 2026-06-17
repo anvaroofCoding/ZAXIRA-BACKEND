@@ -30,6 +30,16 @@ export class WarehouseImportSessionItemDto {
   @IsString()
   @MaxLength(120)
   manufacturingCountry!: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  nomenclatureCode?: string;
+
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  unitPrice?: number;
 }
 
 export class SaveWarehouseImportSessionDto {

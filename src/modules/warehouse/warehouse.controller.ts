@@ -19,6 +19,7 @@ import { CreateWarehouseExpenseDto } from './dto/create-warehouse-expense.dto';
 import { QueryWarehouseExpensesDto } from './dto/query-warehouse-expenses.dto';
 import { QueryWarehouseFixedAssetsDto } from './dto/query-warehouse-fixed-assets.dto';
 import { QueryWarehouseInventoryDto } from './dto/query-warehouse-inventory.dto';
+import { UpdateWarehouseInventoryNomenclatureDto } from './dto/update-warehouse-inventory-nomenclature.dto';
 import { DiscardWarehouseFixedAssetDto } from './dto/discard-warehouse-fixed-asset.dto';
 import { QueryWarehouseImportsDto } from './dto/query-warehouse-imports.dto';
 import { SaveWarehouseImportSessionDto } from './dto/save-warehouse-import-session.dto';
@@ -104,6 +105,22 @@ export class WarehouseController {
     return this.warehouseService.getInventoryItemHistory(
       locationId,
       inventoryId,
+      user.sub,
+      user.role,
+    );
+  }
+
+  @Patch('locations/:id/inventory/:inventoryId/nomenclature')
+  updateInventoryNomenclature(
+    @Param('id', ParseMongoIdPipe) locationId: string,
+    @Param('inventoryId', ParseMongoIdPipe) inventoryId: string,
+    @Body() dto: UpdateWarehouseInventoryNomenclatureDto,
+    @CurrentUser() user: JwtPayload,
+  ) {
+    return this.warehouseService.updateInventoryNomenclature(
+      locationId,
+      inventoryId,
+      dto.nomenclatureCode,
       user.sub,
       user.role,
     );

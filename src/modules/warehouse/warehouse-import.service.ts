@@ -46,6 +46,8 @@ import {
 } from '../structures/schemas/structure.schema';
 import {
   buildInventoryItemKey,
+  inventoryNamesMatch,
+  normalizeNomenclatureCode,
   resolveInventoryBarcodeForStorage,
 } from './utils/inventory-nomenclature.util';
 
@@ -169,6 +171,8 @@ export class WarehouseImportService {
         quantity: item.quantity ?? 1,
         unit: item.unit ?? 'dona',
         manufacturingCountry: item.manufacturingCountry ?? '',
+        nomenclatureCode: item.nomenclatureCode ?? '',
+        unitPrice: item.unitPrice ?? 0,
       })),
       comment: session.comment ?? '',
       createdAt: session.createdAt ?? null,
@@ -201,6 +205,8 @@ export class WarehouseImportService {
           : 1,
       unit: item.unit?.trim() || 'dona',
       manufacturingCountry: item.manufacturingCountry?.trim() ?? '',
+      nomenclatureCode: normalizeNomenclatureCode(item.nomenclatureCode ?? ''),
+      unitPrice: Math.max(0, Math.round(Number(item.unitPrice) || 0)),
     }));
   }
 
@@ -240,14 +246,44 @@ export class WarehouseImportService {
     name: string,
     characteristics: string,
     itemKey: string,
+    receiptNomenclatureCode: string,
   ) {
-    return [
-      { itemKey },
-      {
-        name,
-        characteristics,
-      },
-    ];
+    const matchFilters: Record<string, unknown>[] = [{ itemKey }];
+
+    if (receiptNomenclatureCode) {
+      matchFilters.push({ receiptNomenclatureCode });
+      matchFilters.push({ barcode: receiptNomenclatureCode });
+    }
+
+    matchFilters.push({
+      name,
+      characteristics,
+    });
+
+    return matchFilters;
+  }
+
+  private async assertNomenclatureCompatibleWithInventory(
+    structureId: string,
+    locationId: string,
+    nomenclatureCode: string,
+    name: string,
+  ) {
+    const existing = await this.inventoryModel
+      .findOne({
+        structureId: new Types.ObjectId(structureId),
+        locationId: new Types.ObjectId(locationId),
+        receiptNomenclatureCode: nomenclatureCode,
+      })
+      .select('name')
+      .lean()
+      .exec();
+
+    if (existing && !inventoryNamesMatch(existing.name, name)) {
+      throw new BadRequestException(
+        `«${nomenclatureCode}» nomeklatura raqami allaqachon «${existing.name}» tovariga biriktirilgan. Boshqa nom bilan ishlatib bo‘lmaydi.`,
+      );
+    }
   }
 
   private async upsertImportedInventory(
@@ -257,13 +293,24 @@ export class WarehouseImportService {
       name: string;
       characteristics: string;
       quantity: number;
+      nomenclatureCode: string;
+      unitPrice: number;
     },
     now: Date,
   ) {
-    const itemKey = buildInventoryItemKey(item.name, item.characteristics);
+    const receiptNomenclatureCode = normalizeNomenclatureCode(
+      item.nomenclatureCode,
+    );
+    const itemKey = buildInventoryItemKey(
+      item.name,
+      item.characteristics,
+      receiptNomenclatureCode,
+    );
     const barcode = resolveInventoryBarcodeForStorage(
       item.name,
       item.characteristics,
+      undefined,
+      receiptNomenclatureCode,
     );
     const structureObjectId = new Types.ObjectId(structureId);
     const locationObjectId = new Types.ObjectId(locationId);
@@ -271,7 +318,23 @@ export class WarehouseImportService {
       item.name,
       item.characteristics,
       itemKey,
+      receiptNomenclatureCode,
     );
+
+    const setFields: Record<string, unknown> = {
+      lastReceiptAt: now,
+      name: item.name,
+      characteristics: item.characteristics,
+    };
+
+    if (item.unitPrice > 0) {
+      setFields.unitPrice = item.unitPrice;
+    }
+
+    if (receiptNomenclatureCode) {
+      setFields.receiptNomenclatureCode = receiptNomenclatureCode;
+      setFields.itemKey = itemKey;
+    }
 
     const findExisting = () =>
       this.inventoryModel
@@ -289,21 +352,22 @@ export class WarehouseImportService {
         item.name,
         item.characteristics,
         existing.barcode,
+        receiptNomenclatureCode,
       );
+
+      if (
+        resolvedBarcode !== existing.barcode?.trim() &&
+        resolvedBarcode !== receiptNomenclatureCode
+      ) {
+        setFields.barcode = resolvedBarcode;
+      }
 
       await this.inventoryModel
         .updateOne(
           { _id: existing._id },
           {
             $inc: { quantity: item.quantity },
-            $set: {
-              lastReceiptAt: now,
-              name: item.name,
-              characteristics: item.characteristics,
-              ...(existing.barcode?.trim() !== resolvedBarcode
-                ? { barcode: resolvedBarcode }
-                : {}),
-            },
+            $set: setFields,
           },
         )
         .exec();
@@ -320,7 +384,10 @@ export class WarehouseImportService {
         characteristics: item.characteristics,
         barcode,
         quantity: item.quantity,
-        unitPrice: 0,
+        unitPrice: item.unitPrice > 0 ? item.unitPrice : 0,
+        ...(receiptNomenclatureCode
+          ? { receiptNomenclatureCode }
+          : {}),
         lastReceiptAt: now,
       });
     } catch (error: unknown) {
@@ -333,11 +400,7 @@ export class WarehouseImportService {
               { _id: existing._id },
               {
                 $inc: { quantity: item.quantity },
-                $set: {
-                  lastReceiptAt: now,
-                  name: item.name,
-                  characteristics: item.characteristics,
-                },
+                $set: setFields,
               },
             )
             .exec();
@@ -408,6 +471,8 @@ export class WarehouseImportService {
         quantity: item.quantity,
         unit: item.unit,
         manufacturingCountry: item.manufacturingCountry,
+        nomenclatureCode: item.nomenclatureCode ?? '',
+        unitPrice: item.unitPrice ?? 0,
       };
     });
 
@@ -594,6 +659,8 @@ export class WarehouseImportService {
           quantity: 1,
           unit: 'dona',
           manufacturingCountry: '',
+          nomenclatureCode: '',
+          unitPrice: 0,
         },
       ],
       comment: '',
@@ -667,7 +734,12 @@ export class WarehouseImportService {
     await this.saveActiveSession(userId, sessionId, dto, role);
 
     const session = await this.findActiveSessionOrFail(userId, sessionId);
-    const locationId = session.locationId ? String(session.locationId) : '';
+    const locationId =
+      dto.locationId && Types.ObjectId.isValid(dto.locationId)
+        ? dto.locationId
+        : session.locationId
+          ? String(session.locationId)
+          : '';
 
     if (!locationId) {
       throw new BadRequestException('Ombor joyini tanlang');
@@ -680,13 +752,9 @@ export class WarehouseImportService {
 
     await this.assertLocationBelongsToStructure(structureId, locationId);
 
-    const normalizedItems = (session.items ?? []).map((item) => ({
-      name: item.name?.trim() ?? '',
-      characteristics: item.characteristics?.trim() ?? '',
-      quantity: item.quantity ?? 1,
-      unit: item.unit?.trim() || 'dona',
-      manufacturingCountry: item.manufacturingCountry?.trim() ?? '',
-    }));
+    const normalizedItems = this.normalizeSessionItems({
+      items: dto.items?.length ? dto.items : (session.items ?? []),
+    });
 
     if (!normalizedItems.length) {
       throw new BadRequestException('Kamida bitta tovar kiriting');
@@ -714,6 +782,37 @@ export class WarehouseImportService {
       );
     }
 
+    if (normalizedItems.some((item) => !item.nomenclatureCode)) {
+      throw new BadRequestException(
+        'Har bir tovar uchun nomeklatura raqamini kiriting',
+      );
+    }
+
+    if (normalizedItems.some((item) => item.unitPrice < 1)) {
+      throw new BadRequestException('Har bir tovar uchun narx kiriting');
+    }
+
+    const nomenclatureByName = new Map<string, string>();
+    for (const item of normalizedItems) {
+      const previousName = nomenclatureByName.get(item.nomenclatureCode);
+      if (previousName && !inventoryNamesMatch(previousName, item.name)) {
+        throw new BadRequestException(
+          `«${item.nomenclatureCode}» nomeklatura raqami bir xil bo‘lishi kerak, lekin turli nomlar kiritilgan: «${previousName}» va «${item.name}».`,
+        );
+      }
+
+      nomenclatureByName.set(item.nomenclatureCode, item.name);
+    }
+
+    for (const item of normalizedItems) {
+      await this.assertNomenclatureCompatibleWithInventory(
+        structureId,
+        locationId,
+        item.nomenclatureCode,
+        item.name,
+      );
+    }
+
     const now = new Date();
     const code = await this.nextImportCode(structureId);
     const importItems: WarehouseImport['items'] = [];
@@ -726,6 +825,8 @@ export class WarehouseImportService {
           name: item.name,
           characteristics: item.characteristics,
           quantity: item.quantity,
+          nomenclatureCode: item.nomenclatureCode,
+          unitPrice: item.unitPrice,
         },
         now,
       );
@@ -737,6 +838,8 @@ export class WarehouseImportService {
         quantity: item.quantity,
         unit: item.unit,
         manufacturingCountry: item.manufacturingCountry,
+        nomenclatureCode: item.nomenclatureCode,
+        unitPrice: item.unitPrice,
         itemKey,
       });
     }

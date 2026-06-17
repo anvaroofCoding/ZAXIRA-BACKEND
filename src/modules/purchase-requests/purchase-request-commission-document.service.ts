@@ -7,7 +7,10 @@ import { buildQrPngBuffer } from '../../common/utils/qr-code.util';
 import { UsersService } from '../users/users.service';
 import { ApprovalDecision } from './enums/approval-decision.enum';
 import { PurchaseRequestDocument } from './schemas/purchase-request.schema';
-import { PurchaseRequestDocumentSource } from './types/purchase-request-document-source.type';
+import {
+  GenerateKelishuvDocxOptions,
+  PurchaseRequestDocumentSource,
+} from './types/purchase-request-document-source.type';
 import {
   AGREEMENT_TITLE_LINES,
   buildBuyerTitleLines,
@@ -55,12 +58,19 @@ export class PurchaseRequestCommissionDocumentService {
     );
   }
 
-  private async buildQrBuffer(request: PurchaseRequestDocumentSource) {
-    if (!this.shouldAttachQr(request)) {
-      return null;
+  private async buildQrBuffer(
+    request: PurchaseRequestDocumentSource,
+    options: GenerateKelishuvDocxOptions = {},
+  ) {
+    if (this.shouldAttachQr(request)) {
+      return buildQrPngBuffer(this.buildPublicPdfUrl(request), 240);
     }
 
-    return buildQrPngBuffer(this.buildPublicPdfUrl(request), 240);
+    if (options.applicantQrUrl) {
+      return buildQrPngBuffer(options.applicantQrUrl, 240);
+    }
+
+    return null;
   }
 
   private getOrganizationNameLatin() {
@@ -413,10 +423,13 @@ export class PurchaseRequestCommissionDocumentService {
     return y + height;
   }
 
-  async generatePdf(request: PurchaseRequestDocumentSource): Promise<Buffer> {
+  async generatePdf(
+    request: PurchaseRequestDocumentSource,
+    options: GenerateKelishuvDocxOptions = {},
+  ): Promise<Buffer> {
     const bossName = await resolveBossDocumentName(request.boss, this.usersService);
     const data = this.buildRows(request, bossName);
-    const qrBuffer = await this.buildQrBuffer(request);
+    const qrBuffer = await this.buildQrBuffer(request, options);
 
     return new Promise((resolve, reject) => {
       const doc = new PDFDocument({
@@ -528,6 +541,7 @@ export class PurchaseRequestCommissionDocumentService {
       });
 
       y += 22;
+
       const buyerBlockY = y + 4;
       const buyerTextWidth = pageWidth * 0.7;
       const buyerLineHeight = 14;
@@ -573,32 +587,27 @@ export class PurchaseRequestCommissionDocumentService {
         }
       });
 
-      const contentEndY =
+      let contentEndY =
         buyerTitleY + buyerTitleLines.length * buyerLineHeight + 12;
-      doc.y = contentEndY;
-      doc.x = doc.page.margins.left;
 
       if (qrBuffer) {
-        const qrSize = 84;
-        const qrX = doc.page.width - doc.page.margins.right - qrSize;
-        const qrY = contentEndY + 16;
-        const bottomLimit = doc.page.height - doc.page.margins.bottom;
-
-        if (qrY + qrSize <= bottomLimit) {
-          doc.image(qrBuffer, qrX, qrY, { fit: [qrSize, qrSize] });
-        } else {
-          doc.addPage();
-          doc.image(qrBuffer, qrX, doc.page.margins.top, {
-            fit: [qrSize, qrSize],
-          });
-        }
+        const qrSize = 96;
+        const qrY = contentEndY + 24;
+        doc.image(qrBuffer, doc.page.margins.left, qrY, { fit: [qrSize, qrSize] });
+        contentEndY = qrY + qrSize + 16;
       }
+
+      doc.y = contentEndY;
+      doc.x = doc.page.margins.left;
 
       doc.end();
     });
   }
 
-  async generateDocx(request: PurchaseRequestDocumentSource): Promise<Buffer> {
+  async generateDocx(
+    request: PurchaseRequestDocumentSource,
+    options: GenerateKelishuvDocxOptions = {},
+  ): Promise<Buffer> {
     const docx = (await import('docx')) as Record<string, unknown>;
     const AlignmentType = docx.AlignmentType as Record<string, string>;
     const BorderStyle = docx.BorderStyle as Record<string, string>;
@@ -619,7 +628,7 @@ export class PurchaseRequestCommissionDocumentService {
 
     const bossName = await resolveBossDocumentName(request.boss, this.usersService);
     const data = this.buildRows(request, bossName);
-    const qrBuffer = await this.buildQrBuffer(request);
+    const qrBuffer = await this.buildQrBuffer(request, options);
     const buyerTitleLines = buildBuyerTitleLines(
       data.structureName,
       DOCUMENT_BUYER_TEXT_MAX_WIDTH_PT,
@@ -728,6 +737,78 @@ export class PurchaseRequestCommissionDocumentService {
         }),
     );
 
+    const noBorder = {
+      top: { style: BorderStyle.NONE, size: 0, color: 'FFFFFF' },
+      bottom: { style: BorderStyle.NONE, size: 0, color: 'FFFFFF' },
+      left: { style: BorderStyle.NONE, size: 0, color: 'FFFFFF' },
+      right: { style: BorderStyle.NONE, size: 0, color: 'FFFFFF' },
+    };
+
+    const buyerFooterChildren: unknown[] = [
+      new Paragraph({
+        spacing: { before: 120 },
+        children: [new TextRun({ text: 'Buyurtmachi:', bold: true, size: 22 })],
+      }),
+      ...buyerTitleLines.slice(0, -1).map(
+        (line) =>
+          new Paragraph({
+            spacing: { before: 60, line: 276 },
+            children: [
+              new TextRun({
+                text: line,
+                bold: true,
+                size: 24,
+              }),
+            ],
+          }),
+      ),
+      new Paragraph({
+        tabStops: [
+          {
+            type: TabStopType.RIGHT,
+            position: 9360,
+          },
+        ],
+        spacing: {
+          before: buyerTitleLines.length > 1 ? 60 : 120,
+          after: qrBuffer ? 120 : 0,
+          line: 276,
+        },
+        children: [
+          new TextRun({
+            text: buyerTitleLines[buyerTitleLines.length - 1] ?? '',
+            bold: true,
+            size: 24,
+          }),
+          new TextRun({ text: '\t', size: 22 }),
+          new TextRun({
+            text: data.structureLeaderName,
+            bold: true,
+            size: 24,
+          }),
+        ],
+      }),
+    ];
+
+    if (qrBuffer) {
+      buyerFooterChildren.push(
+        new Paragraph({
+          spacing: { before: 280, after: 160 },
+          alignment: AlignmentType.LEFT,
+          children: [
+            new ImageRun({
+              type: 'png',
+              data: qrBuffer,
+              transformation: {
+                width: 110,
+                height: 110,
+              },
+            }),
+          ],
+        }),
+      );
+    }
+
     const document = new Document({
       sections: [
         {
@@ -803,63 +884,26 @@ export class PurchaseRequestCommissionDocumentService {
               borders: cellBorder,
               rows: [tableHeader, ...tableRows],
             }),
-            new Paragraph({
-              spacing: { before: 260 },
-              children: [new TextRun({ text: 'Buyurtmachi:', bold: true, size: 22 })],
-            }),
-            ...buyerTitleLines.slice(0, -1).map(
-              (line) =>
-                new Paragraph({
-                  spacing: { before: 60, line: 276 },
+            new Table({
+              width: { size: DOCX_TABLE_WIDTH_DXA, type: WidthType.DXA },
+              columnWidths: [DOCX_TABLE_WIDTH_DXA],
+              layout: TableLayoutType.FIXED,
+              borders: noBorder,
+              rows: [
+                new TableRow({
                   children: [
-                    new TextRun({
-                      text: line,
-                      bold: true,
-                      size: 24,
+                    new TableCell({
+                      borders: noBorder,
+                      width: {
+                        size: DOCX_TABLE_WIDTH_DXA,
+                        type: WidthType.DXA,
+                      },
+                      children: buyerFooterChildren,
                     }),
                   ],
                 }),
-            ),
-            new Paragraph({
-              tabStops: [
-                {
-                  type: TabStopType.RIGHT,
-                  position: 9360,
-                },
-              ],
-              spacing: { before: buyerTitleLines.length > 1 ? 60 : 120, line: 276 },
-              children: [
-                new TextRun({
-                  text: buyerTitleLines[buyerTitleLines.length - 1] ?? '',
-                  bold: true,
-                  size: 24,
-                }),
-                new TextRun({ text: '\t', size: 22 }),
-                new TextRun({
-                  text: data.structureLeaderName,
-                  bold: true,
-                  size: 24,
-                }),
               ],
             }),
-            ...(qrBuffer
-              ? [
-                  new Paragraph({
-                    spacing: { before: 220 },
-                    alignment: AlignmentType.RIGHT,
-                    children: [
-                      new ImageRun({
-                        type: 'png',
-                        data: qrBuffer,
-                        transformation: {
-                          width: 92,
-                          height: 92,
-                        },
-                      }),
-                    ],
-                  }),
-                ]
-              : []),
           ],
         },
       ],

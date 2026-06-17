@@ -233,27 +233,89 @@ export class PurchaseRequestsService implements OnModuleInit {
     userId: string,
     role?: UserRole,
   ) {
-    if (isSuperAdminRole(role)) {
+    if (await this.isUserElevatedAdmin(userId, role)) {
       return;
+    }
+
+    if (!(await this.hasPurchaseRequestMutatePermission(userId, role))) {
+      throw new ForbiddenException('Arizani tahrirlashga ruxsat yo‘q');
+    }
+  }
+
+  private async isUserElevatedAdmin(
+    userId: string,
+    role?: UserRole,
+  ): Promise<boolean> {
+    if (isSuperAdminRole(role)) {
+      return true;
+    }
+
+    try {
+      const user = await this.usersService.findById(userId);
+      return Boolean(user?.isActive && user.role === UserRole.SUPER_ADMIN);
+    } catch {
+      return false;
+    }
+  }
+
+  private async assertCanEditPurchaseRequest(
+    request: PurchaseRequestDocument,
+    userId: string,
+    role?: UserRole,
+  ) {
+    const isViewerAdmin = await this.isUserElevatedAdmin(userId, role);
+
+    if (!isViewerAdmin && !this.isApplicant(request, userId)) {
+      throw new ForbiddenException(
+        'Faqat ariza beruvchi yoki admin tahrirlashi mumkin',
+      );
+    }
+
+    if (!isViewerAdmin && !this.canOpenDocumentEditSession(request)) {
+      throw new BadRequestException(
+        'Arizani hozirgi holatida tahrirlash mumkin emas',
+      );
+    }
+  }
+
+  private async hasPurchaseRequestCreatePermission(
+    userId: string,
+    role?: UserRole,
+  ): Promise<boolean> {
+    if (isSuperAdminRole(role)) {
+      return true;
     }
 
     const user = await this.usersService.findById(userId);
     if (!user?.isActive) {
-      throw new ForbiddenException('Arizani tahrirlashga ruxsat yo‘q');
+      return false;
     }
 
     if (user.role === UserRole.SUPER_ADMIN) {
-      return;
+      return true;
     }
 
     const permissions = normalizePermissions(
       user.permissions as UserPermissionsMap | undefined,
     );
-    if (
-      !hasPageAction(permissions, PURCHASE_REQUEST_SUBMIT_PATH, 'update', false)
-    ) {
-      throw new ForbiddenException('Arizani tahrirlashga ruxsat yo‘q');
-    }
+    return hasPageAction(
+      permissions,
+      PURCHASE_REQUEST_SUBMIT_PATH,
+      'create',
+      false,
+    );
+  }
+
+  private async hasPurchaseRequestMutatePermission(
+    userId: string,
+    role?: UserRole,
+  ): Promise<boolean> {
+    const [updateAllowed, createAllowed] = await Promise.all([
+      this.hasPurchaseRequestUpdatePermission(userId, role),
+      this.hasPurchaseRequestCreatePermission(userId, role),
+    ]);
+
+    return updateAllowed || createAllowed;
   }
 
   private async hasPurchaseRequestUpdatePermission(
@@ -454,6 +516,93 @@ export class PurchaseRequestsService implements OnModuleInit {
     }));
   }
 
+  private buildMemberDecisionLookup(priorDecisions: MemberDecisionEmbeddable[]) {
+    const byUserId = new Map<string, MemberDecisionEmbeddable>();
+    const byLogin = new Map<string, MemberDecisionEmbeddable>();
+
+    for (const decision of priorDecisions) {
+      const userId = this.normalizeUserId(decision.userId);
+
+      if (userId && !byUserId.has(userId)) {
+        byUserId.set(userId, decision);
+      }
+
+      const login = decision.login?.trim().toLowerCase();
+
+      if (login && !byLogin.has(login)) {
+        byLogin.set(login, decision);
+      }
+    }
+
+    return { byUserId, byLogin };
+  }
+
+  private findPriorMemberDecision(
+    member: Pick<UserSnapshotEmbeddable, 'userId' | 'login'>,
+    lookup: ReturnType<PurchaseRequestsService['buildMemberDecisionLookup']>,
+  ): MemberDecisionEmbeddable | undefined {
+    const byUserId = lookup.byUserId.get(this.normalizeUserId(member.userId));
+
+    if (byUserId) {
+      return byUserId;
+    }
+
+    const login = member.login?.trim().toLowerCase();
+
+    if (login) {
+      return lookup.byLogin.get(login);
+    }
+
+    return undefined;
+  }
+
+  private async loadStoredMemberDecisionsForEdit(
+    requestId: string,
+  ): Promise<MemberDecisionEmbeddable[]> {
+    const row = await this.purchaseRequestModel
+      .findById(requestId)
+      .select('memberDecisions')
+      .lean<{ memberDecisions?: MemberDecisionEmbeddable[] }>()
+      .exec();
+
+    return this.snapshotMemberDecisions(row?.memberDecisions ?? []);
+  }
+
+  /** Tahrirlashda faqat to‘liq kelishgan (APPROVED) a’zolar qarorini saqlaydi. */
+  private preserveMemberDecisionsAfterEdit(
+    commissionMembers: UserSnapshotEmbeddable[],
+    priorDecisions: MemberDecisionEmbeddable[],
+  ): MemberDecisionEmbeddable[] {
+    const lookup = this.buildMemberDecisionLookup(priorDecisions);
+
+    return commissionMembers.map((member) => {
+      const prior = this.findPriorMemberDecision(member, lookup);
+
+      if (prior && this.isMemberFullyApproved(prior.decision)) {
+        return {
+          userId: member.userId,
+          displayName: prior.displayName || member.displayName,
+          login: prior.login || member.login,
+          structureShortName:
+            prior.structureShortName ?? member.structureShortName,
+          position: prior.position ?? member.position,
+          decision: ApprovalDecision.APPROVED,
+          comment: prior.comment ?? '',
+          decidedAt: prior.decidedAt,
+        };
+      }
+
+      return {
+        userId: member.userId,
+        displayName: member.displayName,
+        login: member.login,
+        structureShortName: member.structureShortName,
+        position: member.position?.trim() ?? '',
+        comment: '',
+      };
+    });
+  }
+
   private clearBossDecision(request: PurchaseRequestDocument) {
     request.set('bossDecision', undefined);
     request.set('bossConfirmedAt', undefined);
@@ -464,6 +613,10 @@ export class PurchaseRequestsService implements OnModuleInit {
   private shouldExposeBossDecision(request: PurchaseRequestDocument): boolean {
     if (!request.bossDecision) {
       return false;
+    }
+
+    if (request.bossDecision === ApprovalDecision.APPROVED) {
+      return true;
     }
 
     if (request.status === PurchaseRequestStatus.BOSS_DECISION_PENDING) {
@@ -480,7 +633,25 @@ export class PurchaseRequestsService implements OnModuleInit {
     return true;
   }
 
-  /** Qayta yuborishda to‘liq kelishgan (yoki qisman kelishgan) a’zolar qarorini saqlaydi. */
+  private isApprovalWorkflowClosed(request: PurchaseRequestDocument): boolean {
+    if (
+      request.bossDecision === ApprovalDecision.APPROVED ||
+      request.bossDecision === ApprovalDecision.REJECTED
+    ) {
+      return true;
+    }
+
+    const closedStatuses: PurchaseRequestStatus[] = [
+      PurchaseRequestStatus.PURCHASING,
+      PurchaseRequestStatus.PURCHASED,
+      PurchaseRequestStatus.WAREHOUSE_IN_TRANSIT,
+      PurchaseRequestStatus.WAREHOUSE_COMPLETED,
+    ];
+
+    return closedStatuses.includes(request.status);
+  }
+
+  /** Qayta yuborishda faqat to‘liq kelishgan a’zolar qarorini saqlaydi. */
   private preserveMemberDecisionsAfterResubmit(
     request: PurchaseRequestDocument,
     resubmitToMemberIds: string[],
@@ -494,10 +665,7 @@ export class PurchaseRequestsService implements OnModuleInit {
         (decision) => String(decision.userId) === memberId,
       );
 
-      if (
-        prior?.decision === ApprovalDecision.APPROVED ||
-        prior?.decision === ApprovalDecision.PARTIAL
-      ) {
+      if (prior && this.isMemberFullyApproved(prior.decision)) {
         return {
           userId: member.userId,
           displayName: prior.displayName || member.displayName,
@@ -512,6 +680,17 @@ export class PurchaseRequestsService implements OnModuleInit {
       }
 
       if (prior?.decision === ApprovalDecision.REJECTED && resetIds.has(memberId)) {
+        return {
+          userId: member.userId,
+          displayName: member.displayName,
+          login: member.login,
+          structureShortName: member.structureShortName,
+          position: member.position,
+          comment: '',
+        };
+      }
+
+      if (prior?.decision === ApprovalDecision.PARTIAL) {
         return {
           userId: member.userId,
           displayName: member.displayName,
@@ -582,6 +761,25 @@ export class PurchaseRequestsService implements OnModuleInit {
     );
   }
 
+  private isMemberFullyApproved(decision?: ApprovalDecision | string | null) {
+    return String(decision ?? '').toUpperCase() === ApprovalDecision.APPROVED;
+  }
+
+  private snapshotMemberDecisions(
+    decisions: MemberDecisionEmbeddable[] = [],
+  ): MemberDecisionEmbeddable[] {
+    return decisions.map((vote) => ({
+      userId: vote.userId,
+      displayName: vote.displayName,
+      login: vote.login,
+      structureShortName: vote.structureShortName,
+      position: vote.position,
+      decision: vote.decision,
+      comment: vote.comment ?? '',
+      decidedAt: vote.decidedAt,
+    }));
+  }
+
   private syncMemberDecisionsWithCommission(
     request: PurchaseRequestDocument,
   ): void {
@@ -591,15 +789,10 @@ export class PurchaseRequestsService implements OnModuleInit {
       return;
     }
 
-    const existingByUserId = new Map(
-      (request.memberDecisions ?? []).map((decision) => [
-        this.normalizeUserId(decision.userId),
-        decision,
-      ]),
-    );
+    const lookup = this.buildMemberDecisionLookup(request.memberDecisions ?? []);
 
     request.memberDecisions = members.map((member) => {
-      const prior = existingByUserId.get(this.normalizeUserId(member.userId));
+      const prior = this.findPriorMemberDecision(member, lookup);
 
       if (prior) {
         return {
@@ -634,6 +827,28 @@ export class PurchaseRequestsService implements OnModuleInit {
   }
 
   private getPublicStatus(request: PurchaseRequestDocument): PurchaseRequestStatus {
+    if (request.bossDecision === ApprovalDecision.APPROVED) {
+      const postBossApproval: PurchaseRequestStatus[] = [
+        PurchaseRequestStatus.PURCHASING,
+        PurchaseRequestStatus.PURCHASED,
+        PurchaseRequestStatus.WAREHOUSE_IN_TRANSIT,
+        PurchaseRequestStatus.WAREHOUSE_COMPLETED,
+      ];
+
+      if (postBossApproval.includes(request.status)) {
+        return request.status;
+      }
+
+      return PurchaseRequestStatus.PURCHASING;
+    }
+
+    if (
+      request.bossDecision === ApprovalDecision.REJECTED &&
+      request.status === PurchaseRequestStatus.REJECTED
+    ) {
+      return PurchaseRequestStatus.REJECTED;
+    }
+
     const workflowStatus = this.getWorkflowStatus(request);
 
     if (workflowStatus === PurchaseRequestStatus.BOSS_DECISION_PENDING) {
@@ -685,9 +900,41 @@ export class PurchaseRequestsService implements OnModuleInit {
     return decisions.every((vote) => this.isMemberAgreed(vote.decision));
   }
 
+  private async reconcileBossApprovedStatus(
+    request: PurchaseRequestDocument,
+  ): Promise<void> {
+    if (request.bossDecision !== ApprovalDecision.APPROVED) {
+      return;
+    }
+
+    const postBossApproval: PurchaseRequestStatus[] = [
+      PurchaseRequestStatus.PURCHASING,
+      PurchaseRequestStatus.PURCHASED,
+      PurchaseRequestStatus.WAREHOUSE_IN_TRANSIT,
+      PurchaseRequestStatus.WAREHOUSE_COMPLETED,
+    ];
+
+    if (postBossApproval.includes(request.status)) {
+      return;
+    }
+
+    request.status = PurchaseRequestStatus.PURCHASING;
+    await request.save();
+    this.emitPurchaseRequestChanged(request, 'updated');
+  }
+
   private async reconcileCommissionStatus(
     request: PurchaseRequestDocument,
   ): Promise<void> {
+    if (request.bossDecision === ApprovalDecision.APPROVED) {
+      await this.reconcileBossApprovedStatus(request);
+      return;
+    }
+
+    if (request.bossDecision === ApprovalDecision.REJECTED) {
+      return;
+    }
+
     const lockedStatuses: PurchaseRequestStatus[] = [
       PurchaseRequestStatus.REJECTED,
       PurchaseRequestStatus.PURCHASING,
@@ -882,6 +1129,29 @@ export class PurchaseRequestsService implements OnModuleInit {
   private recomputeStatus(
     request: PurchaseRequestDocument,
   ): PurchaseRequestStatus {
+    if (request.bossDecision === ApprovalDecision.APPROVED) {
+      if (request.status === PurchaseRequestStatus.PURCHASED) {
+        return PurchaseRequestStatus.PURCHASED;
+      }
+
+      if (request.status === PurchaseRequestStatus.WAREHOUSE_IN_TRANSIT) {
+        return PurchaseRequestStatus.WAREHOUSE_IN_TRANSIT;
+      }
+
+      if (request.status === PurchaseRequestStatus.WAREHOUSE_COMPLETED) {
+        return PurchaseRequestStatus.WAREHOUSE_COMPLETED;
+      }
+
+      return PurchaseRequestStatus.PURCHASING;
+    }
+
+    if (
+      request.bossDecision === ApprovalDecision.REJECTED &&
+      request.status === PurchaseRequestStatus.REJECTED
+    ) {
+      return PurchaseRequestStatus.REJECTED;
+    }
+
     if (request.status === PurchaseRequestStatus.REJECTED) {
       return PurchaseRequestStatus.REJECTED;
     }
@@ -937,16 +1207,41 @@ export class PurchaseRequestsService implements OnModuleInit {
     );
   }
 
+  /** Boshliq tasdiqlamaguncha ariza beruvchi tahrirlashi mumkin */
+  private isEditableBeforeBossApproval(request: PurchaseRequestDocument) {
+    if (request.bossDecision === ApprovalDecision.APPROVED) {
+      return false;
+    }
+
+    const workflowStatus = this.getWorkflowStatus(request);
+
+    const postBossApprovalStatuses: PurchaseRequestStatus[] = [
+      PurchaseRequestStatus.PURCHASING,
+      PurchaseRequestStatus.PURCHASED,
+      PurchaseRequestStatus.WAREHOUSE_IN_TRANSIT,
+      PurchaseRequestStatus.WAREHOUSE_COMPLETED,
+    ];
+
+    if (
+      postBossApprovalStatuses.includes(request.status) ||
+      postBossApprovalStatuses.includes(workflowStatus)
+    ) {
+      return false;
+    }
+
+    const isRejectedState =
+      request.status === PurchaseRequestStatus.REJECTED ||
+      workflowStatus === PurchaseRequestStatus.REJECTED;
+
+    if (isRejectedState) {
+      return request.bossDecision === ApprovalDecision.REJECTED;
+    }
+
+    return true;
+  }
+
   private canOpenDocumentEditSession(request: PurchaseRequestDocument) {
-    if (request.status === PurchaseRequestStatus.COMMISSION_REVIEW) {
-      return true;
-    }
-
-    if (request.status === PurchaseRequestStatus.PARTIAL_REVISION) {
-      return true;
-    }
-
-    return this.isBossRejectionPendingResubmit(request);
+    return this.isEditableBeforeBossApproval(request);
   }
 
   private async applyResubmitFieldsToRequest(
@@ -1062,11 +1357,147 @@ export class PurchaseRequestsService implements OnModuleInit {
     return (request.memberDecisions ?? []).some((vote) => !vote.decision);
   }
 
-  private isCommissionMember(request: PurchaseRequestDocument, userId: string) {
+  private isCommissionMember(
+    request: PurchaseRequestDocument,
+    userId: string,
+    userLogin?: string,
+  ) {
     const normalized = this.normalizeUserId(userId);
+    const normalizedLogin = userLogin?.trim().toLowerCase();
+
+    if (
+      request.commissionMembers.some(
+        (member) => this.normalizeUserId(member.userId) === normalized,
+      )
+    ) {
+      return true;
+    }
+
+    if (!normalizedLogin) {
+      return false;
+    }
 
     return request.commissionMembers.some(
-      (member) => this.normalizeUserId(member.userId) === normalized,
+      (member) => member.login?.trim().toLowerCase() === normalizedLogin,
+    );
+  }
+
+  private resolveApprovalParticipantUserIds(
+    request: PurchaseRequestDocument,
+  ): string[] {
+    const ids = new Set<string>();
+    const add = (value: unknown) => {
+      const normalized = this.normalizeUserId(value);
+
+      if (normalized) {
+        ids.add(normalized);
+      }
+    };
+
+    add(request.boss?.userId);
+
+    for (const member of request.commissionMembers ?? []) {
+      add(member.userId);
+    }
+
+    for (const vote of request.memberDecisions ?? []) {
+      add(vote.userId);
+    }
+
+    for (const step of request.history ?? []) {
+      if (
+        step.type === HistoryStepType.DECISION ||
+        step.type === HistoryStepType.BOSS_DECISION ||
+        step.type === HistoryStepType.BOSS_CONFIRMED
+      ) {
+        add(step.actorUserId);
+      }
+    }
+
+    for (const stored of request.approvalParticipantUserIds ?? []) {
+      add(stored);
+    }
+
+    return [...ids];
+  }
+
+  private resolveApprovalParticipantLogins(
+    request: PurchaseRequestDocument,
+  ): Set<string> {
+    const logins = new Set<string>();
+    const add = (value?: string | null) => {
+      const normalized = value?.trim().toLowerCase();
+
+      if (normalized) {
+        logins.add(normalized);
+      }
+    };
+
+    add(request.boss?.login);
+
+    for (const member of request.commissionMembers ?? []) {
+      add(member.login);
+    }
+
+    for (const vote of request.memberDecisions ?? []) {
+      add(vote.login);
+    }
+
+    for (const step of request.history ?? []) {
+      if (
+        step.type === HistoryStepType.DECISION ||
+        step.type === HistoryStepType.BOSS_DECISION ||
+        step.type === HistoryStepType.BOSS_CONFIRMED
+      ) {
+        add(step.actorLogin);
+      }
+    }
+
+    return logins;
+  }
+
+  private syncApprovalParticipantUserIds(
+    request: PurchaseRequestDocument,
+  ): void {
+    request.approvalParticipantUserIds =
+      this.resolveApprovalParticipantUserIds(request).map(
+        (id) => new Types.ObjectId(id),
+      );
+    request.markModified('approvalParticipantUserIds');
+  }
+
+  private viewerMatchesApprovalParticipants(
+    request: PurchaseRequestDocument,
+    userId: string,
+    userLogin?: string,
+  ): boolean {
+    const viewerId = this.normalizeUserId(userId);
+
+    if (
+      viewerId &&
+      this.resolveApprovalParticipantUserIds(request).includes(viewerId)
+    ) {
+      return true;
+    }
+
+    const viewerLogin = userLogin?.trim().toLowerCase();
+
+    if (!viewerLogin) {
+      return false;
+    }
+
+    return this.resolveApprovalParticipantLogins(request).has(viewerLogin);
+  }
+
+  private hasApprovalInboxParticipation(
+    request: PurchaseRequestDocument,
+    userId: string,
+    userLogin?: string,
+  ) {
+    return this.viewerMatchesApprovalParticipants(
+      request,
+      userId,
+      userLogin,
     );
   }
 
@@ -1078,8 +1509,8 @@ export class PurchaseRequestsService implements OnModuleInit {
       return true;
     }
 
-    const bossLogin = request.boss.login?.trim();
-    const viewerLogin = userLogin?.trim();
+    const bossLogin = request.boss.login?.trim().toLowerCase();
+    const viewerLogin = userLogin?.trim().toLowerCase();
 
     return Boolean(bossLogin && viewerLogin && bossLogin === viewerLogin);
   }
@@ -1121,6 +1552,18 @@ export class PurchaseRequestsService implements OnModuleInit {
     );
   }
 
+  private canEditPurchaseRequestAsUser(
+    request: PurchaseRequestDocument,
+    userId: string,
+    role?: UserRole,
+  ) {
+    if (isSuperAdminRole(role)) {
+      return true;
+    }
+
+    return this.isApplicant(request, userId);
+  }
+
   private getViewerRole(
     request: PurchaseRequestDocument,
     userId: string,
@@ -1128,8 +1571,87 @@ export class PurchaseRequestsService implements OnModuleInit {
   ) {
     if (this.isBoss(request, userId, userLogin)) return 'boss' as const;
     if (this.isApplicant(request, userId)) return 'applicant' as const;
-    if (this.isCommissionMember(request, userId)) return 'commission' as const;
+    if (this.isCommissionMember(request, userId, userLogin)) {
+      return 'commission' as const;
+    }
+
+    if (this.hasApprovalHistoryParticipation(request, userId, userLogin)) {
+      const bossHistoryTypes = new Set<HistoryStepType>([
+        HistoryStepType.BOSS_DECISION,
+        HistoryStepType.BOSS_CONFIRMED,
+      ]);
+
+      if (
+        (request.history ?? []).some(
+          (step) =>
+            bossHistoryTypes.has(step.type) &&
+            (this.normalizeUserId(step.actorUserId) ===
+              this.normalizeUserId(userId) ||
+              (userLogin?.trim() &&
+                step.actorLogin?.trim().toLowerCase() ===
+                  userLogin.trim().toLowerCase())),
+        )
+      ) {
+        return 'boss' as const;
+      }
+    }
+
+    if (this.hasMemberDecisionParticipation(request, userId, userLogin)) {
+      return 'commission' as const;
+    }
+
     return null;
+  }
+
+  private hasMemberDecisionParticipation(
+    request: PurchaseRequestDocument,
+    userId: string,
+    userLogin?: string,
+  ) {
+    const normalized = this.normalizeUserId(userId);
+    const normalizedLogin = userLogin?.trim().toLowerCase();
+
+    return (request.memberDecisions ?? []).some((vote) => {
+      if (this.normalizeUserId(vote.userId) === normalized) {
+        return true;
+      }
+
+      if (!normalizedLogin) {
+        return false;
+      }
+
+      return vote.login?.trim().toLowerCase() === normalizedLogin;
+    });
+  }
+
+  private hasApprovalHistoryParticipation(
+    request: PurchaseRequestDocument,
+    userId: string,
+    userLogin?: string,
+  ) {
+    const normalized = this.normalizeUserId(userId);
+    const normalizedLogin = userLogin?.trim().toLowerCase();
+    const participationTypes = new Set<HistoryStepType>([
+      HistoryStepType.DECISION,
+      HistoryStepType.BOSS_DECISION,
+      HistoryStepType.BOSS_CONFIRMED,
+    ]);
+
+    return (request.history ?? []).some((step) => {
+      if (!participationTypes.has(step.type)) {
+        return false;
+      }
+
+      if (this.normalizeUserId(step.actorUserId) === normalized) {
+        return true;
+      }
+
+      if (!normalizedLogin) {
+        return false;
+      }
+
+      return step.actorLogin?.trim().toLowerCase() === normalizedLogin;
+    });
   }
 
   private canDeleteRequest(
@@ -1199,7 +1721,10 @@ export class PurchaseRequestsService implements OnModuleInit {
       approvalSubmitAllowed?: boolean;
       deleteAllowed?: boolean;
       updateAllowed?: boolean;
+      createAllowed?: boolean;
+      isViewerElevatedAdmin?: boolean;
       viewerLogin?: string;
+      approvalInboxView?: boolean;
     },
   ) {
     this.ensureLegacyFields(request);
@@ -1214,11 +1739,21 @@ export class PurchaseRequestsService implements OnModuleInit {
       this.canDeleteRequest(request, viewerUserId, viewerAuthRole);
 
     const myDecision = viewerUserId
-      ? request.memberDecisions?.find(
-          (decision) =>
+      ? request.memberDecisions?.find((decision) => {
+          if (
             this.normalizeUserId(decision.userId) ===
-            this.normalizeUserId(viewerUserId),
-        )
+            this.normalizeUserId(viewerUserId)
+          ) {
+            return true;
+          }
+
+          const viewerLogin = options?.viewerLogin?.trim().toLowerCase();
+
+          return Boolean(
+            viewerLogin &&
+              decision.login?.trim().toLowerCase() === viewerLogin,
+          );
+        })
       : undefined;
 
     const workflowStatus = this.getWorkflowStatus(request);
@@ -1228,40 +1763,61 @@ export class PurchaseRequestsService implements OnModuleInit {
     );
 
     const canSubmitDecision =
+      !this.isApprovalWorkflowClosed(request) &&
       (options?.approvalSubmitAllowed ?? true) &&
       viewerRole === 'commission' &&
       workflowStatus === PurchaseRequestStatus.COMMISSION_REVIEW &&
       this.isCommissionReviewOpen(request) &&
-      !myDecision?.decision;
+      !myDecision?.decision &&
+      !this.isMemberFullyApproved(myDecision?.decision);
 
     const canConfirmBossDecision =
-      isBossViewer && this.isBossDecisionPhase(request);
+      !this.isApprovalWorkflowClosed(request) &&
+      isBossViewer &&
+      this.isBossDecisionPhase(request);
 
-    const canEditInReview =
-      viewerRole === 'applicant' &&
-      workflowStatus === PurchaseRequestStatus.COMMISSION_REVIEW &&
-      Boolean(options?.updateAllowed);
+    const isApplicantViewer = Boolean(
+      viewerUserId && this.isApplicant(request, viewerUserId),
+    );
 
-    const canResubmitToBoss =
-      viewerRole === 'applicant' &&
-      this.isBossRejectionPendingResubmit(request) &&
-      Boolean(options?.updateAllowed);
+    const canMutateOwnRequests = Boolean(
+      options?.updateAllowed || options?.createAllowed,
+    );
 
-    const canResubmit =
-      viewerRole === 'applicant' &&
-      this.hasRejectedMemberDecisions(request) &&
-      workflowStatus === PurchaseRequestStatus.COMMISSION_REVIEW &&
-      Boolean(options?.updateAllowed);
+    const isViewerAdmin =
+      isSuperAdminRole(viewerAuthRole) ||
+      Boolean(options?.isViewerElevatedAdmin);
+
+    const canEditInReview = isViewerAdmin
+      ? true
+      : canMutateOwnRequests &&
+        isApplicantViewer &&
+        this.isEditableBeforeBossApproval(request);
+
+    const canResubmitToBoss = false;
+
+    const canResubmit = false;
 
     const publicStatus = this.getPublicStatus(request);
+    const defaultStatusLabel = this.shouldExposeBossDecision(request) &&
+      request.bossDecision === ApprovalDecision.APPROVED
+      ? 'Tasdiqlangan'
+      : (PURCHASE_REQUEST_STATUS_LABELS[publicStatus] ?? 'Nomaʼlum holat');
+    const statusLabel =
+      options?.approvalInboxView
+        ? defaultStatusLabel
+        : viewerRole === 'commission' &&
+            this.isMemberFullyApproved(myDecision?.decision) &&
+            !canSubmitDecision
+          ? APPROVAL_DECISION_LABELS[ApprovalDecision.APPROVED]
+          : defaultStatusLabel;
 
     return {
       id: request.id,
       requestCode: request.requestCode,
       status: publicStatus,
       workflowStatus,
-      statusLabel:
-        PURCHASE_REQUEST_STATUS_LABELS[publicStatus] ?? 'Nomaʼlum holat',
+      statusLabel,
       commissionMembers: request.commissionMembers.map((member) => ({
         userId: String(member.userId),
         displayName: member.displayName,
@@ -2068,47 +2624,142 @@ export class PurchaseRequestsService implements OnModuleInit {
     };
   }
 
-  private buildApprovalInboxAccessClauses(
-    userId: string,
-    role?: UserRole,
-    viewerLogin?: string,
-  ): Record<string, unknown>[] {
-    const clauses: Record<string, unknown>[] = [];
-
-    if (!isSuperAdminRole(role)) {
-      const userObjectId = new Types.ObjectId(userId);
-      const bossClauses: Record<string, unknown>[] = [
-        { 'boss.userId': userObjectId },
-      ];
-      const normalizedLogin = viewerLogin?.trim().toLowerCase();
-
-      if (normalizedLogin) {
-        bossClauses.push({ 'boss.login': normalizedLogin });
-      }
-
-      clauses.push({
-        $or: [
-          { 'commissionMembers.userId': userObjectId },
-          ...bossClauses,
-        ],
-      });
-      clauses.push({ createdById: { $ne: userObjectId } });
-    }
-
-    return clauses;
+  private escapeRegex(value: string) {
+    return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   }
 
-  private buildApprovalInboxFilter(
-    query: QueryApprovalInboxDto,
+  private buildApprovalInboxLoginFieldClause(
+    field: string,
+    viewerLogin?: string,
+  ): Record<string, unknown> | null {
+    const normalizedLogin = viewerLogin?.trim().toLowerCase();
+
+    if (!normalizedLogin) {
+      return null;
+    }
+
+    return {
+      [field]: {
+        $regex: new RegExp(`^${this.escapeRegex(normalizedLogin)}$`, 'i'),
+      },
+    };
+  }
+
+  private buildApprovalInboxUserIdValues(userId: string) {
+    const values: Array<Types.ObjectId | string> = [
+      new Types.ObjectId(userId),
+    ];
+
+    if (Types.ObjectId.isValid(userId)) {
+      values.push(userId);
+    }
+
+    return values;
+  }
+
+  private buildApprovalInboxUserIdFieldClause(
+    field: string,
     userId: string,
-    role?: UserRole,
+  ): Record<string, unknown> {
+    const values = this.buildApprovalInboxUserIdValues(userId);
+
+    return values.length === 1
+      ? { [field]: values[0] }
+      : { [field]: { $in: values } };
+  }
+
+  private buildApprovalInboxBossIdentityClause(
+    userId: string,
     viewerLogin?: string,
   ): Record<string, unknown> {
-    const clauses = this.buildApprovalInboxAccessClauses(
-      userId,
-      role,
+    const clauses: Record<string, unknown>[] = [
+      this.buildApprovalInboxUserIdFieldClause('boss.userId', userId),
+    ];
+    const loginClause = this.buildApprovalInboxLoginFieldClause(
+      'boss.login',
       viewerLogin,
     );
+
+    if (loginClause) {
+      clauses.push(loginClause);
+    }
+
+    return clauses.length === 1 ? clauses[0] : { $or: clauses };
+  }
+
+  private buildApprovalInboxCommissionIdentityClause(
+    userId: string,
+    viewerLogin?: string,
+  ): Record<string, unknown> {
+    const userIdValues = this.buildApprovalInboxUserIdValues(userId);
+    const branches: Record<string, unknown>[] = [
+      {
+        commissionMembers: {
+          $elemMatch: {
+            userId: { $in: userIdValues },
+          },
+        },
+      },
+    ];
+    const commissionLoginClause = viewerLogin
+      ? {
+          commissionMembers: {
+            $elemMatch: this.buildApprovalInboxLoginFieldClause(
+              'login',
+              viewerLogin,
+            )!,
+          },
+        }
+      : null;
+
+    if (commissionLoginClause) {
+      branches.push(commissionLoginClause);
+    }
+
+    return branches.length === 1 ? branches[0] : { $or: branches };
+  }
+
+  /** Boshliq/komissiya — har qanday holatdagi arizalar (status cheklovi yo‘q). */
+  private buildApprovalInboxAssignmentClause(
+    userId: string,
+    viewerLogin?: string,
+  ): Record<string, unknown> {
+    const userIdValues = this.buildApprovalInboxUserIdValues(userId);
+    const branches: Record<string, unknown>[] = [
+      this.buildApprovalInboxBossIdentityClause(userId, viewerLogin),
+      this.buildApprovalInboxCommissionIdentityClause(userId, viewerLogin),
+      { approvalParticipantUserIds: { $in: userIdValues } },
+      {
+        memberDecisions: {
+          $elemMatch: {
+            userId: { $in: userIdValues },
+          },
+        },
+      },
+    ];
+
+    const memberLoginClause = viewerLogin
+      ? {
+          memberDecisions: {
+            $elemMatch: this.buildApprovalInboxLoginFieldClause(
+              'login',
+              viewerLogin,
+            )!,
+          },
+        }
+      : null;
+
+    if (memberLoginClause) {
+      branches.push(memberLoginClause);
+    }
+
+    return { $or: branches };
+  }
+
+  private buildApprovalInboxDataFilters(
+    query: QueryApprovalInboxDto,
+  ): Record<string, unknown> {
+    const clauses: Record<string, unknown>[] = [];
 
     if (query.structureId && Types.ObjectId.isValid(query.structureId)) {
       const structureObjectId = new Types.ObjectId(query.structureId);
@@ -2139,22 +2790,33 @@ export class PurchaseRequestsService implements OnModuleInit {
     return { $and: clauses };
   }
 
+  private buildApprovalInboxFilter(
+    query: QueryApprovalInboxDto,
+    userId: string,
+    _role?: UserRole,
+    viewerLogin?: string,
+  ): Record<string, unknown> {
+    const clauses: Record<string, unknown>[] = [
+      this.buildApprovalInboxAssignmentClause(userId, viewerLogin),
+    ];
+    const dataFilter = this.buildApprovalInboxDataFilters(query);
+
+    if (Object.keys(dataFilter).length > 0) {
+      clauses.push(dataFilter);
+    }
+
+    return clauses.length === 1 ? clauses[0] : { $and: clauses };
+  }
+
   private async listApprovalInboxStructureFilters(
     userId: string,
-    role?: UserRole,
+    _role?: UserRole,
     viewerLogin?: string,
   ) {
-    const accessClauses = this.buildApprovalInboxAccessClauses(
+    const matchStage = this.buildApprovalInboxAssignmentClause(
       userId,
-      role,
       viewerLogin,
     );
-    const matchClauses: Record<string, unknown>[] = [
-      ...accessClauses,
-      { 'applicantStructure.structureId': { $exists: true, $ne: null } },
-    ];
-    const matchStage =
-      matchClauses.length === 1 ? matchClauses[0] : { $and: matchClauses };
 
     const rows = await this.purchaseRequestModel
       .aggregate<{
@@ -2164,6 +2826,11 @@ export class PurchaseRequestsService implements OnModuleInit {
         requestCount: number;
       }>([
         { $match: matchStage },
+        {
+          $match: {
+            'applicantStructure.structureId': { $exists: true, $ne: null },
+          },
+        },
         {
           $group: {
             _id: '$applicantStructure.structureId',
@@ -2206,9 +2873,12 @@ export class PurchaseRequestsService implements OnModuleInit {
 
     const totalPages = Math.max(1, Math.ceil(total / limit));
 
-    const [deleteAllowed, updateAllowed] = await Promise.all([
+    const [deleteAllowed, updateAllowed, createAllowed, isViewerElevatedAdmin] =
+      await Promise.all([
       this.hasPurchaseRequestDeletePermission(userId, role),
       this.hasPurchaseRequestUpdatePermission(userId, role),
+      this.hasPurchaseRequestCreatePermission(userId, role),
+      this.isUserElevatedAdmin(userId, role),
     ]);
 
     for (const item of items) {
@@ -2221,6 +2891,8 @@ export class PurchaseRequestsService implements OnModuleInit {
         this.toPublic(item, userId, undefined, role, {
           deleteAllowed,
           updateAllowed,
+          createAllowed,
+          isViewerElevatedAdmin,
         }),
       ),
       total,
@@ -2238,13 +2910,18 @@ export class PurchaseRequestsService implements OnModuleInit {
   ) {
     const page = query.page ?? 1;
     const limit = query.limit ?? 10;
-    const filter = this.buildApprovalInboxFilter(query, userId, role, viewerLogin);
     const skip = (page - 1) * limit;
+    const filter = this.buildApprovalInboxFilter(
+      query,
+      userId,
+      role,
+      viewerLogin,
+    );
 
     const [items, total, structureFilters] = await Promise.all([
       this.purchaseRequestModel
         .find(filter)
-        .sort({ createdAt: -1 })
+        .sort({ updatedAt: -1, createdAt: -1 })
         .skip(skip)
         .limit(limit)
         .exec(),
@@ -2261,7 +2938,10 @@ export class PurchaseRequestsService implements OnModuleInit {
 
     return {
       items: items.map((item) =>
-        this.toPublic(item, userId, undefined, role, { viewerLogin }),
+        this.toPublic(item, userId, undefined, role, {
+          viewerLogin,
+          approvalInboxView: true,
+        }),
       ),
       total,
       page,
@@ -2322,17 +3002,21 @@ export class PurchaseRequestsService implements OnModuleInit {
         ? this.buildWarehouseMetaFromDispatch(request, warehouseDispatch)
         : undefined;
 
-    const [approvalSubmitAllowed, deleteAllowed, updateAllowed] =
+    const [approvalSubmitAllowed, deleteAllowed, updateAllowed, createAllowed, isViewerElevatedAdmin] =
       await Promise.all([
         this.hasApprovalSubmitPermission(userId, role),
         this.hasPurchaseRequestDeletePermission(userId, role),
         this.hasPurchaseRequestUpdatePermission(userId, role),
+        this.hasPurchaseRequestCreatePermission(userId, role),
+        this.isUserElevatedAdmin(userId, role),
       ]);
 
     return this.toPublic(request, userId, meta, role, {
       approvalSubmitAllowed,
       deleteAllowed,
       updateAllowed,
+      createAllowed,
+      isViewerElevatedAdmin,
       viewerLogin,
     });
   }
@@ -3238,11 +3922,15 @@ export class PurchaseRequestsService implements OnModuleInit {
 
     for (let attempt = 0; attempt < 6; attempt += 1) {
       try {
-        return await this.purchaseRequestModel.create({
+        const request = await this.purchaseRequestModel.create({
           number,
           requestCode,
           ...payload,
         });
+        this.syncApprovalParticipantUserIds(request);
+        await request.save();
+
+        return request;
       } catch (error) {
         if (!(error instanceof MongoServerError) || error.code !== 11000) {
           throw error;
@@ -3290,17 +3978,11 @@ export class PurchaseRequestsService implements OnModuleInit {
   ) {
     await this.assertPurchaseRequestUpdatePermission(userId, role);
 
+    const priorDecisions = await this.loadStoredMemberDecisionsForEdit(id);
+
     const request = await this.findByIdOrFail(id, userId, role);
 
-    if (!this.isApplicant(request, userId)) {
-      throw new ForbiddenException('Faqat ariza beruvchi tahrirlashi mumkin');
-    }
-
-    if (request.status !== PurchaseRequestStatus.COMMISSION_REVIEW) {
-      throw new BadRequestException(
-        'Arizani faqat «Kelishilmoqda» holatida tahrirlash mumkin',
-      );
-    }
+    await this.assertCanEditPurchaseRequest(request, userId, role);
 
     if (dto.commissionMemberIds.includes(dto.bossId)) {
       throw new BadRequestException(
@@ -3328,7 +4010,9 @@ export class PurchaseRequestsService implements OnModuleInit {
       ? Boolean(dto.purchaseDeadlineMandatory)
       : false;
     const now = new Date();
-    const hadMemberAgreement = this.hasAnyMemberAgreed(request);
+    const hadPriorDecisions = priorDecisions.some((vote) =>
+      Boolean(vote.decision),
+    );
 
     request.commissionMembers = commissionMembers;
     request.boss = boss;
@@ -3341,21 +4025,40 @@ export class PurchaseRequestsService implements OnModuleInit {
     request.purchasePeriodYear = purchasePeriod.purchasePeriodYear;
     request.purchasePeriodQuarter = purchasePeriod.purchasePeriodQuarter;
     request.purchasePeriodMonth = purchasePeriod.purchasePeriodMonth;
-    request.memberDecisions = this.buildMemberDecisions(commissionMembers);
+    const nextMemberDecisions = this.preserveMemberDecisionsAfterEdit(
+      commissionMembers,
+      priorDecisions,
+    );
+    request.memberDecisions = nextMemberDecisions;
     request.markModified('memberDecisions');
     request.markModified('items');
 
-    if (hadMemberAgreement) {
+    const needsCommissionRedecision = nextMemberDecisions.some(
+      (vote) => !this.isMemberFullyApproved(vote.decision),
+    );
+
+    if (request.bossDecision || needsCommissionRedecision) {
       this.clearBossDecision(request);
-      request.resubmittedAfterPartialAt = undefined;
     }
 
-    request.status = PurchaseRequestStatus.COMMISSION_REVIEW;
+    request.resubmittedAfterPartialAt = needsCommissionRedecision
+      ? now
+      : undefined;
 
-    const historyComment = hadMemberAgreement
+    request.status = needsCommissionRedecision
+      ? PurchaseRequestStatus.COMMISSION_REVIEW
+      : PurchaseRequestStatus.BOSS_DECISION_PENDING;
+
+    const historyNote = needsCommissionRedecision
+      ? 'Rad etgan yoki qisman kelishgan a’zolar qayta qaror berishi kerak. To‘liq kelishgan a’zolar qarori saqlanadi.'
+      : hadPriorDecisions
+        ? 'Komissiya to‘liq kelishgan — boshliq qarori kutilmoqda.'
+        : '';
+
+    const historyComment = historyNote
       ? comment
-        ? `${comment}\n\n(Barcha kelishuvlar bekor qilindi — qayta kelishish talab etiladi)`
-        : 'Barcha kelishuvlar bekor qilindi — qayta kelishish talab etiladi'
+        ? `${comment}\n\n(${historyNote})`
+        : historyNote
       : comment;
 
     request.history.push({
@@ -3372,6 +4075,7 @@ export class PurchaseRequestsService implements OnModuleInit {
     });
     request.markModified('history');
 
+    this.syncApprovalParticipantUserIds(request);
     await request.save();
 
     this.emitPurchaseRequestChanged(request, 'updated');
@@ -3442,15 +4146,7 @@ export class PurchaseRequestsService implements OnModuleInit {
 
     const request = await this.findByIdOrFail(requestId, userId, role);
 
-    if (!this.isApplicant(request, userId)) {
-      throw new ForbiddenException('Faqat ariza beruvchi tahrirlashi mumkin');
-    }
-
-    if (!this.canOpenDocumentEditSession(request)) {
-      throw new BadRequestException(
-        'Hujjatlarni tahrirlash uchun ariza holati mos emas',
-      );
-    }
+    await this.assertCanEditPurchaseRequest(request, userId, role);
 
     const userObjectId = new Types.ObjectId(userId);
     const total = await this.purchaseRequestSessionModel
@@ -3561,6 +4257,12 @@ export class PurchaseRequestsService implements OnModuleInit {
       );
     }
 
+    if (this.isApprovalWorkflowClosed(request)) {
+      throw new BadRequestException(
+        'Boshliq tasdiqlagan arizaga komissiya qarori qabul qilinmaydi',
+      );
+    }
+
     if (
       request.status === PurchaseRequestStatus.PURCHASING ||
       request.status === PurchaseRequestStatus.PURCHASED
@@ -3617,6 +4319,7 @@ export class PurchaseRequestsService implements OnModuleInit {
 
     this.syncMemberDecisionsWithCommission(request);
     request.status = this.recomputeStatus(request);
+    this.syncApprovalParticipantUserIds(request);
     await request.save();
 
     if (dto.decision === ApprovalDecision.REJECTED) {
@@ -3822,6 +4525,10 @@ export class PurchaseRequestsService implements OnModuleInit {
       throw new ForbiddenException('Faqat boshliq qaror berishi mumkin');
     }
 
+    if (this.isApprovalWorkflowClosed(request)) {
+      throw new BadRequestException('Ariza allaqachon tasdiqlangan yoki yakunlangan');
+    }
+
     await this.reconcileCommissionStatus(request);
     this.syncMemberDecisionsWithCommission(request);
 
@@ -3872,6 +4579,7 @@ export class PurchaseRequestsService implements OnModuleInit {
     });
     request.markModified('history');
 
+    this.syncApprovalParticipantUserIds(request);
     await request.save();
 
     if (dto.decision === ApprovalDecision.APPROVED) {
@@ -3882,6 +4590,7 @@ export class PurchaseRequestsService implements OnModuleInit {
           );
         request.submittedBildirgi = submittedDocuments.bildirgi;
         request.submittedKelishuv = submittedDocuments.kelishuv;
+        this.syncApprovalParticipantUserIds(request);
         await request.save();
       } catch (error) {
         this.logger.error(
@@ -4320,37 +5029,20 @@ export class PurchaseRequestsService implements OnModuleInit {
         this.sessionDocumentsService.createApplicantVerificationToken();
     }
 
-    const hasExistingEditDocuments =
-      Boolean(session.editingRequestId) &&
-      (await this.sessionDocumentsService.getDocumentUpdatedAt(
-        sessionId,
-        'bildirgi',
-      )) > 0 &&
-      (await this.sessionDocumentsService.getDocumentUpdatedAt(
-        sessionId,
-        'kelishuv',
-      )) > 0;
-
     if (options?.regenerateKelishuvOnly) {
       await this.sessionDocumentsService.writeKelishuvDocument(
         session,
         userId,
         sessionId,
         requestCode,
+        session.applicantVerificationToken,
       );
-    } else if (!hasExistingEditDocuments) {
+    } else {
       await this.sessionDocumentsService.prepareSessionDocuments(
         session,
         userId,
         sessionId,
         session.applicantVerificationToken,
-        requestCode,
-      );
-    } else {
-      await this.sessionDocumentsService.writeKelishuvDocument(
-        session,
-        userId,
-        sessionId,
         requestCode,
       );
     }

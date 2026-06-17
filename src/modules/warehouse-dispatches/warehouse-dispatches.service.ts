@@ -24,6 +24,8 @@ import { NotificationsEventsService } from '../notifications/notifications-event
 import { StructuresService } from '../structures/structures.service';
 import {
   TRANSFER_RECEIPT_PAGE_PATH,
+  TRANSFER_HISTORY_PAGE_PATH,
+  TRANSFER_PAGE_PATH,
   WAREHOUSE_2D_TRANSFER_VIEW_PAGE_PATHS,
   WAREHOUSE_RECEIPT_PAGE_PATH,
   WAREHOUSES_2D_PAGE_PATH,
@@ -56,6 +58,12 @@ import { CreateWarehouseDispatchDto } from './dto/create-warehouse-dispatch.dto'
 import { QueryWarehouseDispatchInboxDto } from './dto/query-warehouse-dispatch-inbox.dto';
 import { ReceiveWarehouseDispatchDto } from './dto/receive-warehouse-dispatch.dto';
 import { CreateTransferDispatchDto } from './dto/create-transfer-dispatch.dto';
+import { CancelTransferDispatchDto } from './dto/cancel-transfer-dispatch.dto';
+import {
+  TRANSFER_CANCEL_OTHER_REASON_KEY,
+  TRANSFER_CANCEL_REASONS,
+  isTransferCancelReasonKey,
+} from './constants/transfer-cancel-reasons';
 import {
   WAREHOUSE_DISPATCH_STATUS_LABELS,
   WarehouseDispatchStatus,
@@ -765,7 +773,23 @@ export class WarehouseDispatchesService {
       receivedTotal,
       canReceive:
         pendingTotal > 0 &&
-        dispatch.status !== WarehouseDispatchStatus.COMPLETED,
+        dispatch.status !== WarehouseDispatchStatus.COMPLETED &&
+        dispatch.status !== WarehouseDispatchStatus.CANCELLED,
+      canCancel:
+        dispatch.status === WarehouseDispatchStatus.PENDING_RECEIPT &&
+        pendingTotal > 0 &&
+        dispatch.items.every((item) => item.quantityReceived <= 0),
+      cancelReasonKey: dispatch.cancelReasonKey?.trim() || null,
+      cancelReasonLabel: dispatch.cancelReasonLabel?.trim() || null,
+      cancelReasonOther: dispatch.cancelReasonOther?.trim() || null,
+      cancelledAt: dispatch.cancelledAt ?? null,
+      cancelledBy: dispatch.cancelledBy
+        ? {
+            userId: String(dispatch.cancelledBy.userId),
+            displayName: dispatch.cancelledBy.displayName,
+            login: dispatch.cancelledBy.login,
+          }
+        : null,
       createdAt: dispatch.createdAt,
       updatedAt: dispatch.updatedAt,
     };
@@ -1227,7 +1251,17 @@ export class WarehouseDispatchesService {
       await this.enrichTransferItemNomenclature(dispatch);
     }
 
-    return this.toPublic(dispatch, userId, role);
+    const user = await this.usersService.findById(userId);
+    const userStructureId = await this.getUserStructureId(userId);
+    const result = this.toPublic(dispatch, userId, role);
+    result.canCancel = this.resolveViewerCanCancelTransfer(
+      dispatch,
+      userId,
+      role,
+      userStructureId,
+    );
+
+    return result;
   }
 
   async findReceiptInboxPaginated(
@@ -1243,17 +1277,28 @@ export class WarehouseDispatchesService {
     const limit = query.limit ?? 10;
     const skip = (page - 1) * limit;
 
-    const clauses: Record<string, unknown>[] = [
-      {
-        status: {
-          $in: [
-            WarehouseDispatchStatus.PENDING_RECEIPT,
-            WarehouseDispatchStatus.PARTIALLY_RECEIVED,
-            WarehouseDispatchStatus.COMPLETED,
-          ],
-        },
-      },
+    const clauses: Record<string, unknown>[] = [];
+
+    const historyStatuses = [
+      WarehouseDispatchStatus.PENDING_RECEIPT,
+      WarehouseDispatchStatus.PARTIALLY_RECEIVED,
+      WarehouseDispatchStatus.COMPLETED,
+      WarehouseDispatchStatus.CANCELLED,
     ];
+    const receiptStatuses = [
+      WarehouseDispatchStatus.PENDING_RECEIPT,
+      WarehouseDispatchStatus.PARTIALLY_RECEIVED,
+      WarehouseDispatchStatus.COMPLETED,
+    ];
+
+    clauses.push({
+      status: {
+        $in:
+          query.source === 'transfer' && query.scope === 'history'
+            ? historyStatuses
+            : receiptStatuses,
+      },
+    });
 
     if (query.source === 'transfer') {
       clauses.push({
@@ -1268,19 +1313,38 @@ export class WarehouseDispatchesService {
         role,
       );
 
-      if (!structureId && !canViewAllTransfersFor2D) {
+      if (
+        query.source === 'transfer' &&
+        query.scope === 'history'
+      ) {
+        if (!structureId && !canViewAllTransfersFor2D) {
+          return { items: [], total: 0, page, limit, totalPages: 1 };
+        }
+      } else if (!structureId && !canViewAllTransfersFor2D) {
         return { items: [], total: 0, page, limit, totalPages: 1 };
       }
 
-      if (query.source === 'transfer' && query.scope === 'history') {
-        if (!canViewAllTransfersFor2D && structureId) {
-          clauses.push(this.buildTransferHistoryStructureOr(structureId));
+      if (
+        query.source !== 'transfer' ||
+        query.scope !== 'history'
+      ) {
+        if (structureId) {
+          clauses.push({
+            'targetStructure.structureId': new Types.ObjectId(structureId),
+          });
         }
-      } else if (structureId) {
-        clauses.push({
-          'targetStructure.structureId': new Types.ObjectId(structureId),
-        });
       }
+    }
+
+    if (query.structureId?.trim()) {
+      const filterStruct = new Types.ObjectId(query.structureId.trim());
+      clauses.push({
+        $or: [
+          { 'targetStructure.structureId': filterStruct },
+          { sourceStructureId: filterStruct },
+          { 'sourceStructure.structureId': filterStruct },
+        ],
+      });
     }
 
     appendDateRangeClause(
@@ -1321,8 +1385,19 @@ export class WarehouseDispatchesService {
       this.dispatchModel.countDocuments(filter).exec(),
     ]);
 
+    const userStructureId = await this.getUserStructureId(userId);
+
     return {
-      items: items.map((item) => this.toPublic(item, userId, role)),
+      items: items.map((item) => {
+        const result = this.toPublic(item, userId, role);
+        result.canCancel = this.resolveViewerCanCancelTransfer(
+          item,
+          userId,
+          role,
+          userStructureId,
+        );
+        return result;
+      }),
       total,
       page,
       limit,
@@ -1390,6 +1465,10 @@ export class WarehouseDispatchesService {
       }
 
       locationObjectId = location._id;
+    }
+
+    if (dispatch.status === WarehouseDispatchStatus.CANCELLED) {
+      throw new BadRequestException('Transfer bekor qilingan');
     }
 
     if (
@@ -1766,5 +1845,250 @@ export class WarehouseDispatchesService {
     }
 
     return map;
+  }
+
+  getTransferCancelReasons() {
+    return TRANSFER_CANCEL_REASONS;
+  }
+
+  private isDispatchCancelableState(dispatch: WarehouseDispatchDocument) {
+    if (!this.isTransferDispatch(dispatch)) {
+      return false;
+    }
+
+    if (dispatch.status !== WarehouseDispatchStatus.PENDING_RECEIPT) {
+      return false;
+    }
+
+    if (dispatch.items.some((item) => item.quantityReceived > 0)) {
+      return false;
+    }
+
+    return dispatch.items.some((item) => {
+      const pending =
+        item.quantityDispatched -
+        item.quantityReceived -
+        item.quantityRejected;
+
+      return pending > 0;
+    });
+  }
+
+  private isViewerTransferSender(
+    dispatch: WarehouseDispatchDocument,
+    userId: string,
+    userStructureId: string | null,
+    role?: UserRole,
+  ) {
+    if (isSuperAdminRole(role)) {
+      return true;
+    }
+
+    const sourceStruct = this.resolveDispatchSourceStructureId(dispatch);
+
+    if (userStructureId && sourceStruct && userStructureId === sourceStruct) {
+      return true;
+    }
+
+    const dispatchedByUserId = this.normalizeStructureId(
+      dispatch.dispatchedBy?.userId,
+    );
+    const userIdNorm = this.normalizeStructureId(userId);
+
+    return Boolean(
+      dispatchedByUserId && userIdNorm && dispatchedByUserId === userIdNorm,
+    );
+  }
+
+  private resolveViewerCanCancelTransfer(
+    dispatch: WarehouseDispatchDocument,
+    userId: string,
+    role: UserRole | undefined,
+    userStructureId: string | null,
+  ) {
+    if (!this.isDispatchCancelableState(dispatch)) {
+      return false;
+    }
+
+    return this.isViewerTransferSender(
+      dispatch,
+      userId,
+      userStructureId,
+      role,
+    );
+  }
+
+  private async assertCanCancelTransfer(
+    dispatch: WarehouseDispatchDocument,
+    userId: string,
+    role?: UserRole,
+  ) {
+    if (!this.isTransferDispatch(dispatch)) {
+      throw new BadRequestException('Faqat transfer bekor qilinadi');
+    }
+
+    if (dispatch.status === WarehouseDispatchStatus.CANCELLED) {
+      throw new BadRequestException('Transfer allaqachon bekor qilingan');
+    }
+
+    if (dispatch.status !== WarehouseDispatchStatus.PENDING_RECEIPT) {
+      throw new BadRequestException(
+        'Faqat qabul kutilayotgan transferni bekor qilish mumkin',
+      );
+    }
+
+    const anyReceived = dispatch.items.some(
+      (item) => item.quantityReceived > 0,
+    );
+
+    if (anyReceived) {
+      throw new BadRequestException(
+        'Qisman qabul qilingan transferni bekor qilib bo‘lmaydi',
+      );
+    }
+
+    if (isSuperAdminRole(role)) {
+      return;
+    }
+
+    const userStructureId = await this.getUserStructureId(userId);
+    const sourceStruct = this.resolveDispatchSourceStructureId(dispatch);
+
+    if (!userStructureId || userStructureId !== sourceStruct) {
+      const dispatchedByUserId = this.normalizeStructureId(
+        dispatch.dispatchedBy?.userId,
+      );
+      const userIdNorm = this.normalizeStructureId(userId);
+
+      if (
+        !dispatchedByUserId ||
+        !userIdNorm ||
+        dispatchedByUserId !== userIdNorm
+      ) {
+        throw new ForbiddenException(
+          'Faqat jo‘natuvchi tuzilma xodimi yoki transferni yuborgan xodim bekor qila oladi',
+        );
+      }
+    }
+
+    const user = await this.usersService.findById(userId);
+
+    if (!user?.isActive) {
+      throw new ForbiddenException('Transferni bekor qilish uchun ruxsat yo‘q');
+    }
+  }
+
+  async cancelTransfer(
+    id: string,
+    dto: CancelTransferDispatchDto,
+    userId: string,
+    role?: UserRole,
+  ) {
+    const dispatch = await this.findByIdOrFail(id);
+    await this.assertCanCancelTransfer(dispatch, userId, role);
+
+    if (!isTransferCancelReasonKey(dto.reasonKey)) {
+      throw new BadRequestException('Bekor qilish sababi noto‘g‘ri');
+    }
+
+    const reason = TRANSFER_CANCEL_REASONS.find((r) => r.key === dto.reasonKey)!;
+    const reasonOther = dto.reasonOther?.trim() ?? '';
+
+    if (dto.reasonKey === TRANSFER_CANCEL_OTHER_REASON_KEY && !reasonOther) {
+      throw new BadRequestException('Boshqa sabab uchun izoh kiriting');
+    }
+
+    const sourceStructureId = dispatch.sourceStructureId
+      ? String(dispatch.sourceStructureId)
+      : null;
+
+    if (!sourceStructureId) {
+      throw new BadRequestException('Transfer jo‘natuvchi tuzilmasi topilmadi');
+    }
+
+    const mergedReturns = new Map<
+      string,
+      {
+        locationId: Types.ObjectId;
+        sourceBarcode: string;
+        name: string;
+        characteristics: string;
+        qty: number;
+      }
+    >();
+
+    for (const item of dispatch.items) {
+      const pending =
+        item.quantityDispatched -
+        item.quantityReceived -
+        item.quantityRejected;
+
+      if (pending < 1 || !item.sourceLocationId || !item.sourceBarcode?.trim()) {
+        continue;
+      }
+
+      const key = `${String(item.sourceLocationId)}|${item.sourceBarcode}`;
+      const existing = mergedReturns.get(key);
+
+      if (existing) {
+        existing.qty += pending;
+      } else {
+        mergedReturns.set(key, {
+          locationId: item.sourceLocationId,
+          sourceBarcode: item.sourceBarcode,
+          name: item.name,
+          characteristics: item.characteristics,
+          qty: pending,
+        });
+      }
+    }
+
+    const returnOps = Array.from(mergedReturns.values()).map((row) => ({
+      updateOne: {
+        filter: {
+          structureId: new Types.ObjectId(sourceStructureId),
+          locationId: row.locationId,
+          barcode: row.sourceBarcode,
+        },
+        update: {
+          $setOnInsert: {
+            structureId: new Types.ObjectId(sourceStructureId),
+            locationId: row.locationId,
+            itemKey: buildWarehouseItemKey(row.name, row.characteristics),
+            name: row.name,
+            characteristics: row.characteristics,
+            barcode: row.sourceBarcode,
+          },
+          $inc: { quantity: row.qty },
+          $set: { updatedAt: new Date() },
+        },
+        upsert: true,
+      },
+    }));
+
+    if (returnOps.length) {
+      await this.inventoryModel.collection.bulkWrite(returnOps, {
+        ordered: false,
+      });
+    }
+
+    const canceller = await this.buildUserSnapshot(userId);
+    const now = new Date();
+
+    dispatch.status = WarehouseDispatchStatus.CANCELLED;
+    dispatch.cancelReasonKey = reason.key;
+    dispatch.cancelReasonLabel = reason.label;
+    dispatch.cancelReasonOther =
+      dto.reasonKey === TRANSFER_CANCEL_OTHER_REASON_KEY ? reasonOther : '';
+    dispatch.cancelledBy = canceller;
+    dispatch.cancelledAt = now;
+
+    await dispatch.save();
+
+    await this.warehousePricingService.syncInventoryUnitPrices(
+      sourceStructureId,
+    );
+
+    return this.toPublic(dispatch, userId, role);
   }
 }

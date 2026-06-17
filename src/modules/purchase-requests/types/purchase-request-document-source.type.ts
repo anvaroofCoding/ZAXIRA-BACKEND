@@ -25,7 +25,12 @@ export interface PurchaseRequestDocumentSource {
 }
 
 export interface GenerateDocxOptions {
-  /** Ariza beruvchi imzosi o'rniga QR (faqat bildirgi) */
+  /** Ariza beruvchi imzosi o'rniga QR (bildirgi va kelishuv) */
+  applicantQrUrl?: string;
+}
+
+export interface GenerateKelishuvDocxOptions {
+  /** Ariza beruvchi tasdiqlash QR (yuborish bosqichida) */
   applicantQrUrl?: string;
 }
 

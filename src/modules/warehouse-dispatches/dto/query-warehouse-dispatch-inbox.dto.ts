@@ -45,4 +45,8 @@ export class QueryWarehouseDispatchInboxDto {
   @IsOptional()
   @IsString()
   scope?: string;
+
+  @IsOptional()
+  @IsString()
+  structureId?: string;
 }

@@ -18,6 +18,7 @@ import type { JwtPayload } from '../auth/interfaces/jwt-payload.interface';
 import { PurchaseRequestsService } from '../purchase-requests/purchase-requests.service';
 import { CreateWarehouseDispatchDto } from './dto/create-warehouse-dispatch.dto';
 import { CreateTransferDispatchDto } from './dto/create-transfer-dispatch.dto';
+import { CancelTransferDispatchDto } from './dto/cancel-transfer-dispatch.dto';
 import { QueryWarehouseDispatchInboxDto } from './dto/query-warehouse-dispatch-inbox.dto';
 import { ReceiveWarehouseDispatchDto } from './dto/receive-warehouse-dispatch.dto';
 import { WarehouseDispatchDocumentService } from './warehouse-dispatch-document.service';
@@ -41,6 +42,7 @@ export class WarehouseDispatchesController {
     @Query('dateTo') dateTo: string | undefined,
     @Query('source') source: string | undefined,
     @Query('scope') scope: string | undefined,
+    @Query('structureId') structureId: string | undefined,
     @CurrentUser() user: JwtPayload,
   ) {
     const query = new QueryWarehouseDispatchInboxDto();
@@ -51,12 +53,18 @@ export class WarehouseDispatchesController {
     query.dateTo = dateTo?.trim() || undefined;
     query.source = source?.trim() || undefined;
     query.scope = scope?.trim() || undefined;
+    query.structureId = structureId?.trim() || undefined;
 
     return this.warehouseDispatchesService.findReceiptInboxPaginated(
       query,
       user.sub,
       user.role,
     );
+  }
+
+  @Get('cancel-reasons')
+  getTransferCancelReasons() {
+    return this.warehouseDispatchesService.getTransferCancelReasons();
   }
 
   @Get('receipt/pending-count')
@@ -130,6 +138,20 @@ export class WarehouseDispatchesController {
     @CurrentUser() user: JwtPayload,
   ) {
     return this.warehouseDispatchesService.createTransfer(
+      dto,
+      user.sub,
+      user.role,
+    );
+  }
+
+  @Post(':id/cancel')
+  cancelTransfer(
+    @Param('id', ParseMongoIdPipe) id: string,
+    @Body() dto: CancelTransferDispatchDto,
+    @CurrentUser() user: JwtPayload,
+  ) {
+    return this.warehouseDispatchesService.cancelTransfer(
+      id,
       dto,
       user.sub,
       user.role,

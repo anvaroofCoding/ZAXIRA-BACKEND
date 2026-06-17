@@ -114,6 +114,10 @@ export class PurchaseRequest {
   @Prop({ type: [MemberDecisionSchema], default: [] })
   memberDecisions!: MemberDecisionEmbeddable[];
 
+  /** Tasdiqlash jarayonida ishtirok etgan foydalanuvchilar (inbox uchun) */
+  @Prop({ type: [{ type: Types.ObjectId }], default: [] })
+  approvalParticipantUserIds!: Types.ObjectId[];
+
   @Prop({ type: [HistoryStepSchema], default: [] })
   history!: HistoryStepEmbeddable[];
 
@@ -159,5 +163,6 @@ export const PurchaseRequestSchema =
 PurchaseRequestSchema.index({ createdById: 1, createdAt: -1 });
 PurchaseRequestSchema.index({ 'commissionMembers.userId': 1, createdAt: -1 });
 PurchaseRequestSchema.index({ 'boss.userId': 1, createdAt: -1 });
+PurchaseRequestSchema.index({ approvalParticipantUserIds: 1, updatedAt: -1 });
 // Unique indexlar allaqachon @Prop darajasida berilgan,
 // shuning uchun bu yerda takroran e'lon qilish shart emas.

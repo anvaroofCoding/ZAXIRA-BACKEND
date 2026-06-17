@@ -86,6 +86,21 @@ export class WarehouseDispatch {
   @Prop({ default: false, index: true })
   isSeenByReceiver!: boolean;
 
+  @Prop({ trim: true })
+  cancelReasonKey?: string;
+
+  @Prop({ trim: true })
+  cancelReasonLabel?: string;
+
+  @Prop({ trim: true })
+  cancelReasonOther?: string;
+
+  @Prop({ type: UserSnapshotSchema, required: false })
+  cancelledBy?: UserSnapshotEmbeddable;
+
+  @Prop()
+  cancelledAt?: Date;
+
   createdAt?: Date;
   updatedAt?: Date;
 }

@@ -7,6 +7,8 @@ export type WarehouseImportSessionItemEmbeddable = {
   quantity: number;
   unit: string;
   manufacturingCountry: string;
+  nomenclatureCode: string;
+  unitPrice: number;
 };
 
 @Schema({ _id: false })
@@ -25,6 +27,12 @@ export class WarehouseImportSessionItemSchemaClass {
 
   @Prop({ trim: true, default: '' })
   manufacturingCountry!: string;
+
+  @Prop({ trim: true, default: '' })
+  nomenclatureCode!: string;
+
+  @Prop({ min: 0, default: 0 })
+  unitPrice!: number;
 }
 
 export const WarehouseImportSessionItemSchema = SchemaFactory.createForClass(

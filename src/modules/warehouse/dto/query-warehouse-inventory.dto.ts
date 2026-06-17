@@ -25,6 +25,12 @@ export class QueryWarehouseInventoryDto {
   search?: string;
 
   @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  minQuantity?: number;
+
+  @IsOptional()
   @IsMongoId()
   structureId?: string;
 }

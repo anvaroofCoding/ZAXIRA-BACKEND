@@ -155,6 +155,7 @@ export class PurchaseRequestSessionDocumentsService {
     userId: string,
     sessionId: string,
     requestCode: string,
+    applicantVerificationToken?: string,
   ) {
     const dir = this.getSessionDir(sessionId);
     await mkdir(dir, { recursive: true });
@@ -165,8 +166,13 @@ export class PurchaseRequestSessionDocumentsService {
       sessionId,
       requestCode,
     );
+    const applicantQrUrl = applicantVerificationToken
+      ? this.buildApplicantQrUrl(applicantVerificationToken)
+      : undefined;
     const kelishuvBuffer =
-      await this.commissionDocumentService.generateDocx(draft);
+      await this.commissionDocumentService.generateDocx(draft, {
+        applicantQrUrl,
+      });
 
     await writeFile(
       this.resolveDocumentPath(sessionId, 'kelishuv'),
@@ -192,7 +198,13 @@ export class PurchaseRequestSessionDocumentsService {
       requestCode,
     );
 
-    await this.writeKelishuvDocument(session, userId, sessionId, requestCode);
+    await this.writeKelishuvDocument(
+      session,
+      userId,
+      sessionId,
+      requestCode,
+      applicantVerificationToken,
+    );
 
     if (!options?.skipBildirgi) {
       const applicantQrUrl = this.buildApplicantQrUrl(applicantVerificationToken);
@@ -214,7 +226,12 @@ export class PurchaseRequestSessionDocumentsService {
 
   async regenerateRequestKelishuvDocument(request: PurchaseRequestDocument) {
     const source = this.buildDocumentSourceFromRequest(request);
-    const buffer = await this.commissionDocumentService.generateDocx(source);
+    const applicantQrUrl = request.applicantVerificationToken
+      ? this.buildApplicantQrUrl(request.applicantVerificationToken)
+      : undefined;
+    const buffer = await this.commissionDocumentService.generateDocx(source, {
+      applicantQrUrl,
+    });
     const targetDir = this.getRequestDocumentsDir(request.id);
     await mkdir(targetDir, { recursive: true });
     await writeFile(path.join(targetDir, 'kelishuv.docx'), buffer);

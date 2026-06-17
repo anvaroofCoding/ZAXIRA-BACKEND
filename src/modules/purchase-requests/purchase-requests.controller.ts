@@ -531,10 +531,6 @@ export class PurchaseRequestsController {
 
   @Get(':id/submitted-documents/:docType')
   @SkipTransform()
-  @Header(
-    'Content-Type',
-    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-  )
   async downloadSubmittedDocument(
     @Param('id', ParseMongoIdPipe) id: string,
     @Param('docType') docType: string,

@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { Types } from 'mongoose';
+import { ApprovalDecision } from '../purchase-requests/enums/approval-decision.enum';
 import { PurchaseRequestStatus } from '../purchase-requests/enums/purchase-request-status.enum';
 import { PurchaseRequestDocument } from '../purchase-requests/schemas/purchase-request.schema';
 import { WarehouseDispatchDocument } from '../warehouse-dispatches/schemas/warehouse-dispatch.schema';
@@ -90,7 +91,12 @@ export class NotificationsEventsService {
             (item) => String(item.userId) === memberId,
           );
 
-          if (decision?.decision) continue;
+          if (
+            String(decision?.decision ?? '').toUpperCase() ===
+            ApprovalDecision.APPROVED
+          ) {
+            continue;
+          }
 
           inputs.push({
             userId: memberId,

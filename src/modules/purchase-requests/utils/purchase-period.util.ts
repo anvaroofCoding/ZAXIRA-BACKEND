@@ -41,6 +41,7 @@ export const parsePurchasePeriodType = (
 
   if (
     normalized === PurchasePeriodType.PLAIN ||
+    normalized === PurchasePeriodType.YEAR ||
     normalized === PurchasePeriodType.QUARTER ||
     normalized === PurchasePeriodType.MONTH
   ) {
@@ -76,6 +77,10 @@ export const validatePurchasePeriod = (input: PurchasePeriodInput) => {
     throw new BadRequestException('Sotib olish yilini tanlang');
   }
 
+  if (purchasePeriodType === PurchasePeriodType.YEAR) {
+    return;
+  }
+
   if (purchasePeriodType === PurchasePeriodType.QUARTER) {
     if (!input.purchasePeriodQuarter) {
       throw new BadRequestException('Chorakni tanlang');
@@ -104,6 +109,10 @@ export const formatPurchasePeriodLabel = (input: PurchasePeriodInput): string | 
 
   if (!input.purchasePeriodYear) {
     return null;
+  }
+
+  if (input.purchasePeriodType === PurchasePeriodType.YEAR) {
+    return `${input.purchasePeriodYear} yil`;
   }
 
   if (input.purchasePeriodType === PurchasePeriodType.QUARTER) {

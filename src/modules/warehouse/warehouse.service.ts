@@ -44,7 +44,9 @@ import {
 } from './utils/inventory-item-public.util';
 import {
   buildInventoryItemKey,
+  inventoryNamesMatch,
   normalizeInventoryName,
+  normalizeNomenclatureCode,
 } from './utils/inventory-nomenclature.util';
 import { computeWarehouseBarcode } from './utils/warehouse-barcode.util';
 import {
@@ -618,10 +620,14 @@ export class WarehouseService {
       filter.$or = buildInventorySearchOr(search);
     }
 
+    if (query.minQuantity != null) {
+      filter.quantity = { $gte: query.minQuantity };
+    }
+
     const [items, total, priceMap] = await Promise.all([
       this.inventoryModel
         .find(filter)
-        .sort({ updatedAt: -1 })
+        .sort({ quantity: -1, name: 1 })
         .skip(skip)
         .limit(limit)
         .select(
@@ -690,6 +696,104 @@ export class WarehouseService {
       total,
       page,
       limit,
+    };
+  }
+
+  async updateInventoryNomenclature(
+    locationId: string,
+    inventoryId: string,
+    nomenclatureCodeRaw: string,
+    userId: string,
+    role?: UserRole,
+  ) {
+    await this.assertPageActionPermission(
+      userId,
+      role,
+      MY_WAREHOUSE_PAGE_PATH,
+      'update',
+      'Nomeklatura yozishga ruxsat yo‘q',
+    );
+
+    const structureId = await this.resolveViewerStructureWithWarehouseOrFail(
+      userId,
+      role,
+    );
+    const nomenclatureCode = normalizeNomenclatureCode(nomenclatureCodeRaw);
+
+    if (!nomenclatureCode) {
+      throw new BadRequestException('Nomeklatura raqamini kiriting');
+    }
+
+    const location = await this.locationModel
+      .findOne({
+        _id: new Types.ObjectId(locationId),
+        structureId: new Types.ObjectId(structureId),
+        isActive: true,
+      })
+      .select('_id')
+      .exec();
+
+    if (!location) {
+      throw new NotFoundException('Ombor joyi topilmadi');
+    }
+
+    const inventory = await this.inventoryModel
+      .findOne({
+        _id: new Types.ObjectId(inventoryId),
+        structureId: new Types.ObjectId(structureId),
+        locationId: new Types.ObjectId(locationId),
+      })
+      .exec();
+
+    if (!inventory) {
+      throw new NotFoundException('Tovar topilmadi');
+    }
+
+    if (inventory.receiptNomenclatureCode?.trim()) {
+      throw new BadRequestException('Bu tovarda nomeklatura allaqachon mavjud');
+    }
+
+    const existing = await this.inventoryModel
+      .findOne({
+        structureId: new Types.ObjectId(structureId),
+        locationId: new Types.ObjectId(locationId),
+        receiptNomenclatureCode: nomenclatureCode,
+        _id: { $ne: inventory._id },
+      })
+      .select('name')
+      .lean()
+      .exec();
+
+    if (existing && !inventoryNamesMatch(existing.name, inventory.name)) {
+      throw new BadRequestException(
+        `«${nomenclatureCode}» nomeklatura raqami allaqachon «${existing.name}» tovariga biriktirilgan. Boshqa nom bilan ishlatib bo‘lmaydi.`,
+      );
+    }
+
+    const itemKey = buildInventoryItemKey(
+      inventory.name,
+      inventory.characteristics,
+      nomenclatureCode,
+    );
+    const barcode = resolveInventoryBarcode(
+      inventory.name,
+      inventory.characteristics,
+      inventory.barcode,
+      nomenclatureCode,
+    );
+
+    inventory.receiptNomenclatureCode = nomenclatureCode;
+    inventory.itemKey = itemKey;
+    inventory.barcode = barcode;
+    await inventory.save();
+
+    return {
+      id: inventory.id,
+      name: inventory.name,
+      characteristics: inventory.characteristics,
+      barcode,
+      nomenclatureCode: mapNomenclatureCode(inventory.receiptNomenclatureCode),
+      quantity: inventory.quantity ?? 0,
     };
   }
 
@@ -877,7 +981,7 @@ export class WarehouseService {
     const [items, total] = await Promise.all([
       this.inventoryModel
         .find(filter)
-        .sort({ updatedAt: -1 })
+        .sort({ quantity: -1, name: 1 })
         .skip(skip)
         .limit(limit)
         .select(
@@ -2130,6 +2234,7 @@ export class WarehouseService {
         | 'purchase_receipt'
         | 'transfer_in'
         | 'transfer_out'
+        | 'transfer_cancelled'
         | 'expense'
         | 'fixed_asset'
         | 'fixed_asset_return'
@@ -2169,7 +2274,7 @@ export class WarehouseService {
             'items.sourceLocationId': locationObjectId,
           })
           .select(
-            'dispatchCode targetStructure items dispatchedAt createdAt updatedAt',
+            'dispatchCode targetStructure items dispatchedAt createdAt updatedAt status cancelReasonLabel cancelReasonOther cancelledAt',
           )
           .sort({ dispatchedAt: 1 })
           .exec(),
@@ -2277,6 +2382,53 @@ export class WarehouseService {
           linkPath: `/transfer/transferlar-tarixi?dispatch=${dispatch.id}`,
           linkLabel: 'Transfer tarixini ko‘rish',
         });
+      }
+
+      if (dispatch.status === WarehouseDispatchStatus.CANCELLED) {
+        for (const item of dispatch.items ?? []) {
+          if (String(item.sourceLocationId ?? '') !== String(locationObjectId)) {
+            continue;
+          }
+          if (
+            !this.inventoryMatchesDispatchItem(
+              {
+                itemKey,
+                barcode,
+                name: inventory.name,
+                characteristics: inventory.characteristics,
+              },
+              item,
+            )
+          ) {
+            continue;
+          }
+
+          const qty = item.quantityDispatched ?? 0;
+          if (qty < 1) continue;
+
+          const reasonLabel = dispatch.cancelReasonLabel?.trim() || '';
+          const reasonOther = dispatch.cancelReasonOther?.trim() || '';
+          const reasonText = reasonOther
+            ? `${reasonLabel}: ${reasonOther}`
+            : reasonLabel;
+
+          events.push({
+            id: `dispatch-cancelled-${dispatch.id}-${item.itemIndex}`,
+            type: 'transfer_cancelled',
+            title: 'Transfer bekor qilindi',
+            description: `${dispatch.dispatchCode} · ${targetName} ga jo‘natilgan transfer bekor qilindi${
+              reasonText ? ` · Sabab: ${reasonText}` : ''
+            }`,
+            quantity: qty,
+            occurredAt:
+              dispatch.cancelledAt ??
+              dispatch.updatedAt ??
+              dispatch.createdAt ??
+              new Date(),
+            linkPath: `/transfer/transferlar-tarixi?dispatch=${dispatch.id}`,
+            linkLabel: 'Transfer tarixini ko‘rish',
+          });
+        }
       }
     }
 

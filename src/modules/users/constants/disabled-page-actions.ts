@@ -30,7 +30,7 @@ export const DISABLED_PAGE_ACTIONS: Record<string, PermissionActionKey[]> = {
   [PRODUCTS_PAGE_PATH]: ['create', 'update'],
   [TRANSFER_PAGE_PATH]: ['create', 'update', 'delete'],
   [TRANSFER_RECEIPT_PAGE_PATH]: ['update', 'delete'],
-  [TRANSFER_HISTORY_PAGE_PATH]: ['create', 'update', 'delete'],
+  [TRANSFER_HISTORY_PAGE_PATH]: ['create', 'delete'],
 };
 
 export const ALL_WAREHOUSES_OVERVIEW_PAGE_PATHS = [

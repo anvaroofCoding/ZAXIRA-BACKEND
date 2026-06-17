@@ -96,7 +96,8 @@ export class PurchaseRequestDocumentService {
       request.applicantStructure?.leaderName?.trim() || '—';
     return {
       requestCode: request.requestCode,
-      recipientLine: `${ctx.organizationNameLatin} boshlig'i ${bossName}ga`,
+      recipientOrgLine: ctx.organizationNameLatin,
+      recipientBossLine: `boshlig'i ${bossName}ga`,
       comment: request.comment?.trim() || '—',
       structureName,
       structureLeaderName,
@@ -274,17 +275,14 @@ export class PurchaseRequestDocumentService {
         lineBreak: false,
       });
 
-      const recipientWidth = pageWidth * 0.58;
-      const recipientX = doc.page.width - doc.page.margins.right - recipientWidth;
-      doc.text(data.recipientLine, recipientX, y, {
-        width: recipientWidth,
-        align: 'right',
-        lineGap: 1,
-      });
-      const recipientHeight = doc.heightOfString(data.recipientLine, {
-        width: recipientWidth,
-        lineGap: 1,
-      });
+      doc.font('bold').fontSize(11);
+      this.placeTextFlushRight(doc, data.recipientOrgLine, y);
+      const orgLineHeight = doc.heightOfString(data.recipientOrgLine);
+      this.placeTextFlushRight(doc, data.recipientBossLine, y + orgLineHeight + 2);
+      const recipientHeight =
+        orgLineHeight +
+        2 +
+        doc.heightOfString(data.recipientBossLine);
       y += Math.max(16, recipientHeight) + 14;
 
       doc.font('bold').fontSize(14).text('Bildirgi', doc.page.margins.left, y, {
@@ -529,16 +527,21 @@ export class PurchaseRequestDocumentService {
           },
           children: [
             new Paragraph({
-              tabStops: [
-                {
-                  type: TabStopType.RIGHT,
-                  position: 9360,
-                },
-              ],
               children: [
                 new TextRun({ text: `№ ${data.requestCode}`, bold: true, size: 22 }),
-                new TextRun({ text: '\t', size: 22 }),
-                new TextRun({ text: data.recipientLine, bold: true, size: 22 }),
+              ],
+            }),
+            new Paragraph({
+              alignment: AlignmentType.RIGHT,
+              children: [
+                new TextRun({ text: data.recipientOrgLine, bold: true, size: 22 }),
+              ],
+            }),
+            new Paragraph({
+              alignment: AlignmentType.RIGHT,
+              spacing: { after: 120 },
+              children: [
+                new TextRun({ text: data.recipientBossLine, bold: true, size: 22 }),
               ],
             }),
             new Paragraph({
