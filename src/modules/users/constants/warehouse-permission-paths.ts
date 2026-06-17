@@ -3,7 +3,7 @@ export const WAREHOUSE_PERMISSION_PATHS = [
   '/omborlar/mening-omborim',
   '/omborlar/tavar-import-qilish',
   '/omborlar/boshqa-omborlar',
-  '/omborlar/2d-omborlar',
+  '/dashboard/2d-omborlar',
   '/omborlar/chiqim-qilish',
 ] as const;
 

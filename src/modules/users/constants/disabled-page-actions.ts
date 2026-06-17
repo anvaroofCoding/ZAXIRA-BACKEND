@@ -9,7 +9,8 @@ export const PURCHASING_QUEUE_PAGE_PATH =
   '/xarid-qilish/sotib-olinadigan-tavarlar';
 export const WAREHOUSE_RECEIPT_PAGE_PATH = '/xarid-qilish/xaridni-qabul-qilish';
 export const OTHER_WAREHOUSES_PAGE_PATH = '/omborlar/boshqa-omborlar';
-export const WAREHOUSES_2D_PAGE_PATH = '/omborlar/2d-omborlar';
+export const WAREHOUSES_2D_PAGE_PATH = '/dashboard/2d-omborlar';
+export const WAREHOUSES_2D_LEGACY_PAGE_PATH = '/omborlar/2d-omborlar';
 export const WAREHOUSE_EXPENSE_PAGE_PATH = '/omborlar/chiqim-qilish';
 export const WAREHOUSE_IMPORT_PAGE_PATH = '/omborlar/tavar-import-qilish';
 export const PRODUCTS_PAGE_PATH = '/dashboard/maxsulotlar';

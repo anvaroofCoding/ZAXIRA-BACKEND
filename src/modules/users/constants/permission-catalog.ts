@@ -22,6 +22,7 @@ export const PERMISSION_CATALOG = {
   links: [
     { path: '/dashboard', label: 'Dashboard' },
     { path: '/dashboard/maxsulotlar', label: 'Maxsulotlar' },
+    { path: '/dashboard/2d-omborlar', label: '2D Omborlar' },
   ] satisfies PermissionCatalogLink[],
   groups: [
     {
@@ -76,7 +77,6 @@ export const PERMISSION_CATALOG = {
         { path: '/omborlar/mening-omborim', label: 'Mening omborim' },
         { path: '/omborlar/tavar-import-qilish', label: 'Tavar import qilish' },
         { path: '/omborlar/boshqa-omborlar', label: 'Boshqa omborlar' },
-        { path: '/omborlar/2d-omborlar', label: '2D Omborlar' },
         { path: '/omborlar/chiqim-qilish', label: 'Chiqim' },
       ],
     },

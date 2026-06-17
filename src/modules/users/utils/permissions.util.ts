@@ -6,6 +6,8 @@ import {
   isPageActionDisabled,
   TRANSFER_RECEIPT_PAGE_PATH,
   WAREHOUSE_RECEIPT_PAGE_PATH,
+  WAREHOUSES_2D_LEGACY_PAGE_PATH,
+  WAREHOUSES_2D_PAGE_PATH,
 } from '../constants/disabled-page-actions';
 
 const RECEIPT_PAGE_PATHS = new Set([
@@ -113,8 +115,17 @@ export const normalizePermissions = (
     return base;
   }
 
+  const source = { ...input };
+
+  if (
+    source[WAREHOUSES_2D_LEGACY_PAGE_PATH]?.access &&
+    !source[WAREHOUSES_2D_PAGE_PATH]?.access
+  ) {
+    source[WAREHOUSES_2D_PAGE_PATH] = source[WAREHOUSES_2D_LEGACY_PAGE_PATH];
+  }
+
   for (const path of ALL_PERMISSION_PATHS) {
-    const current = input[path];
+    const current = source[path];
     const access = Boolean(current?.access);
 
     base[path] = {
@@ -135,7 +146,12 @@ export const hasPageAccess = (
     return true;
   }
 
-  return Boolean(permissions?.[path]?.access);
+  const lookupPaths =
+    path === WAREHOUSES_2D_PAGE_PATH || path === WAREHOUSES_2D_LEGACY_PAGE_PATH
+      ? [WAREHOUSES_2D_PAGE_PATH, WAREHOUSES_2D_LEGACY_PAGE_PATH]
+      : [path];
+
+  return lookupPaths.some((lookupPath) => Boolean(permissions?.[lookupPath]?.access));
 };
 
 export const hasAnyPageAccess = (
