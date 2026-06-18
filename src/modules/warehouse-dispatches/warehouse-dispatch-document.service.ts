@@ -1,18 +1,12 @@
 import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import * as path from 'node:path';
 import PDFDocument from 'pdfkit';
+import {
+  PDF_FONT_BOLD_PATH,
+  PDF_FONT_REGULAR_PATH,
+} from '../../common/utils/pdf-fonts.util';
 import { WAREHOUSE_DISPATCH_STATUS_LABELS } from './enums/warehouse-dispatch-status.enum';
 import { WarehouseDispatchDocument } from './schemas/warehouse-dispatch.schema';
-
-const FONT_PATH = path.join(
-  process.cwd(),
-  'node_modules/dejavu-fonts-ttf/ttf/DejaVuSans.ttf',
-);
-const FONT_BOLD_PATH = path.join(
-  process.cwd(),
-  'node_modules/dejavu-fonts-ttf/ttf/DejaVuSans-Bold.ttf',
-);
 
 @Injectable()
 export class WarehouseDispatchDocumentService {
@@ -55,8 +49,8 @@ export class WarehouseDispatchDocumentService {
       doc.on('end', () => resolve(Buffer.concat(chunks)));
       doc.on('error', reject);
 
-      doc.registerFont('regular', FONT_PATH);
-      doc.registerFont('bold', FONT_BOLD_PATH);
+      doc.registerFont('regular', PDF_FONT_REGULAR_PATH);
+      doc.registerFont('bold', PDF_FONT_BOLD_PATH);
       doc.font('bold').fontSize(14).text(org, { align: 'center' });
       doc.moveDown();
       doc.font('bold').fontSize(12).text('NAKLADNOY', { align: 'center' });

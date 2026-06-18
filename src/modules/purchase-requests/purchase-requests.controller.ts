@@ -469,7 +469,6 @@ export class PurchaseRequestsController {
 
   @Get(':id/export/commission/pdf')
   @SkipTransform()
-  @Header('Content-Type', 'application/pdf')
   async exportCommissionPdf(
     @Param('id', ParseMongoIdPipe) id: string,
     @Query('historyView') historyView: string | undefined,
@@ -516,7 +515,6 @@ export class PurchaseRequestsController {
 
   @Get(':id/export/pdf')
   @SkipTransform()
-  @Header('Content-Type', 'application/pdf')
   async exportPdf(
     @Param('id', ParseMongoIdPipe) id: string,
     @Query('historyView') historyView: string | undefined,
@@ -1100,19 +1098,19 @@ export class PurchaseRequestsController {
 
       if (!Number.isFinite(vatRate) || ![0, 6, 12].includes(vatRate)) {
         throw new BadRequestException(
-          `${index + 1}-tovar INDS foizi noto‘g‘ri`,
+          `${index + 1}-tovar QQS foizi noto‘g‘ri`,
         );
       }
 
       if (!Number.isFinite(vatAmount) || vatAmount < 0) {
         throw new BadRequestException(
-          `${index + 1}-tovar INDS summasi noto‘g‘ri`,
+          `${index + 1}-tovar QQS summasi noto‘g‘ri`,
         );
       }
 
       if (vatRate > 0 && vatAmount < 1) {
         throw new BadRequestException(
-          `${index + 1}-tovar uchun INDS summasini kiriting`,
+          `${index + 1}-tovar uchun QQS summasini kiriting`,
         );
       }
 

@@ -1,7 +1,10 @@
 import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import * as path from 'node:path';
 import PDFDocument from 'pdfkit';
+import {
+  PDF_FONT_BOLD_PATH,
+  PDF_FONT_REGULAR_PATH,
+} from '../../common/utils/pdf-fonts.util';
 import { buildPurchaseRequestKelishuvPdfPublicUrl } from '../../common/utils/public-url.util';
 import { buildQrPngBuffer } from '../../common/utils/qr-code.util';
 import { UsersService } from '../users/users.service';
@@ -19,15 +22,6 @@ import {
   parseAgreementParagraphs,
 } from './utils/document-text-layout.util';
 import { resolveBossDocumentName } from './utils/resolve-boss-document-name.util';
-
-const FONT_PATH = path.join(
-  process.cwd(),
-  'node_modules/dejavu-fonts-ttf/ttf/DejaVuSans.ttf',
-);
-const FONT_BOLD_PATH = path.join(
-  process.cwd(),
-  'node_modules/dejavu-fonts-ttf/ttf/DejaVuSans-Bold.ttf',
-);
 
 /** A4 (11906 DXA) − chap/o‘ng margin 850×2 */
 const DOCX_CONTENT_WIDTH_DXA = 10206;
@@ -442,8 +436,8 @@ export class PurchaseRequestCommissionDocumentService {
       doc.on('end', () => resolve(Buffer.concat(chunks)));
       doc.on('error', reject);
 
-      doc.registerFont('regular', FONT_PATH);
-      doc.registerFont('bold', FONT_BOLD_PATH);
+      doc.registerFont('regular', PDF_FONT_REGULAR_PATH);
+      doc.registerFont('bold', PDF_FONT_BOLD_PATH);
 
       const pageWidth =
         doc.page.width - doc.page.margins.left - doc.page.margins.right;

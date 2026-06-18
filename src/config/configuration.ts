@@ -1,6 +1,12 @@
 import { loadBackendEnvFiles } from './load-env';
+import * as path from 'node:path';
 
 loadBackendEnvFiles();
+
+const resolveUploadDir = () => {
+  const raw = process.env.UPLOAD_DIR ?? './uploads';
+  return path.isAbsolute(raw) ? raw : path.resolve(process.cwd(), raw);
+};
 
 export default () => ({
   nodeEnv: process.env.NODE_ENV ?? 'development',
@@ -23,7 +29,7 @@ export default () => ({
     limit: parseInt(process.env.THROTTLE_LIMIT ?? '120', 10),
   },
   upload: {
-    dir: process.env.UPLOAD_DIR ?? './uploads',
+    dir: resolveUploadDir(),
     maxFileSizeMb: parseInt(process.env.MAX_FILE_SIZE_MB ?? '10', 10),
   },
   organization: {

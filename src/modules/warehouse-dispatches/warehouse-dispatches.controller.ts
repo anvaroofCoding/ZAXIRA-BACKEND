@@ -97,7 +97,6 @@ export class WarehouseDispatchesController {
 
   @Get(':id/nakladnoy/pdf')
   @SkipTransform()
-  @Header('Content-Type', 'application/pdf')
   async exportNakladnoyPdf(@Param('id', ParseMongoIdPipe) id: string) {
     const dispatch = await this.warehouseDispatchesService.findByIdOrFail(id);
     const buffer = await this.documentService.generatePdf(dispatch);

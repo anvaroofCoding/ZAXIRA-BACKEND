@@ -2,7 +2,6 @@ import {
   Controller,
   ForbiddenException,
   Get,
-  Header,
   Param,
   StreamableFile,
 } from '@nestjs/common';
@@ -23,7 +22,6 @@ export class PurchaseRequestPublicController {
 
   @Get(':id/pdf')
   @SkipTransform()
-  @Header('Content-Type', 'application/pdf')
   async viewPdf(@Param('id', ParseMongoIdPipe) id: string) {
     const request = await this.purchaseRequestsService.findByIdOrFail(id);
 
@@ -46,7 +44,6 @@ export class PurchaseRequestPublicController {
 
   @Get(':id/commission-pdf')
   @SkipTransform()
-  @Header('Content-Type', 'application/pdf')
   async viewCommissionPdf(@Param('id', ParseMongoIdPipe) id: string) {
     const request = await this.purchaseRequestsService.findByIdOrFail(id);
 

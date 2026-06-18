@@ -23,15 +23,15 @@ export class PurchaseRequestItemEmbeddable {
   @Prop({ trim: true, default: '' })
   manufacturingCountry!: string;
 
-  /** Xarid qilingandan keyin to‘langan summa (so‘m), INDSsiz */
+  /** Xarid qilingandan keyin to‘langan summa (so‘m), QQSsiz */
   @Prop({ min: 1 })
   purchaseAmount?: number;
 
-  /** INDS foizi: 0, 6 yoki 12 */
+  /** QQS foizi: 0, 6 yoki 12 */
   @Prop({ min: 0, max: 12, default: 0 })
   purchaseVatRate?: number;
 
-  /** 1 dona uchun INDS summasi (so‘m) */
+  /** 1 dona uchun QQS summasi (so‘m) */
   @Prop({ min: 0, default: 0 })
   purchaseVatAmount?: number;
 

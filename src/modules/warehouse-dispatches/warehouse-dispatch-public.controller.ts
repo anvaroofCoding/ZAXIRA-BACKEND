@@ -1,4 +1,4 @@
-import { Controller, Get, Header, Param, StreamableFile } from '@nestjs/common';
+import { Controller, Get, Param, StreamableFile } from '@nestjs/common';
 import { SkipTransform } from '../../common/decorators/skip-transform.decorator';
 import { ParseMongoIdPipe } from '../../common/pipes/parse-mongo-id.pipe';
 import { WarehouseDispatchDocumentService } from './warehouse-dispatch-document.service';
@@ -13,7 +13,6 @@ export class WarehouseDispatchPublicController {
 
   @Get(':id/pdf')
   @SkipTransform()
-  @Header('Content-Type', 'application/pdf')
   async viewNakladnoyPdf(@Param('id', ParseMongoIdPipe) id: string) {
     const dispatch = await this.warehouseDispatchesService.findByIdOrFail(id);
     const buffer = await this.documentService.generatePdf(dispatch);
