@@ -939,6 +939,398 @@ export class WarehouseService {
     );
   }
 
+  private startOfUtcDay(date: Date) {
+    const normalized = new Date(date);
+    normalized.setUTCHours(0, 0, 0, 0);
+    return normalized;
+  }
+
+  private addUtcDays(date: Date, days: number) {
+    const next = new Date(date);
+    next.setUTCDate(next.getUTCDate() + days);
+    return next;
+  }
+
+  private subtractUtcMonths(from: Date, months: number) {
+    const d = new Date(Date.UTC(from.getUTCFullYear(), from.getUTCMonth(), 1));
+    d.setUTCMonth(d.getUTCMonth() - months);
+    return d;
+  }
+
+  private utcDayKey(date: Date) {
+    const y = date.getUTCFullYear();
+    const m = String(date.getUTCMonth() + 1).padStart(2, '0');
+    const d = String(date.getUTCDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  }
+
+  private utcMonthKey(date: Date) {
+    const y = date.getUTCFullYear();
+    const m = String(date.getUTCMonth() + 1).padStart(2, '0');
+    return `${y}-${m}`;
+  }
+
+  private startOfUtcWeek(date: Date) {
+    const d = this.startOfUtcDay(date);
+    const weekday = d.getUTCDay();
+    const diff = weekday === 0 ? -6 : 1 - weekday;
+    return this.addUtcDays(d, diff);
+  }
+
+  private async aggregateWarehouseMovementsByDay(
+    structureObjectId: Types.ObjectId,
+    from: Date,
+    toExclusive: Date,
+  ) {
+    const receivedRows = (await this.dispatchModel
+      .aggregate([
+        {
+          $match: {
+            status: {
+              $in: [
+                WarehouseDispatchStatus.PARTIALLY_RECEIVED,
+                WarehouseDispatchStatus.COMPLETED,
+              ],
+            },
+            'targetStructure.structureId': structureObjectId,
+            dispatchedAt: { $gte: from, $lt: toExclusive },
+          },
+        },
+        { $unwind: '$items' },
+        { $match: { 'items.quantityReceived': { $gt: 0 } } },
+        {
+          $project: {
+            day: {
+              $dateToString: { format: '%Y-%m-%d', date: '$dispatchedAt' },
+            },
+            qty: '$items.quantityReceived',
+          },
+        },
+        { $group: { _id: '$day', total: { $sum: '$qty' } } },
+      ])
+      .exec()) as Array<{ _id: string; total: number }>;
+
+    const dispatchedOutRows = (await this.dispatchModel
+      .aggregate([
+        {
+          $match: {
+            $or: [
+              { sourceStructureId: structureObjectId },
+              { 'sourceStructure.structureId': structureObjectId },
+            ],
+            dispatchedAt: { $gte: from, $lt: toExclusive },
+          },
+        },
+        { $unwind: '$items' },
+        { $match: { 'items.quantityDispatched': { $gt: 0 } } },
+        {
+          $project: {
+            day: {
+              $dateToString: { format: '%Y-%m-%d', date: '$dispatchedAt' },
+            },
+            qty: '$items.quantityDispatched',
+          },
+        },
+        { $group: { _id: '$day', total: { $sum: '$qty' } } },
+      ])
+      .exec()) as Array<{ _id: string; total: number }>;
+
+    const expenseRows = (await this.expenseModel
+      .aggregate([
+        {
+          $match: {
+            structureId: structureObjectId,
+            createdAt: { $gte: from, $lt: toExclusive },
+          },
+        },
+        { $unwind: '$items' },
+        {
+          $project: {
+            day: {
+              $dateToString: { format: '%Y-%m-%d', date: '$createdAt' },
+            },
+            qty: '$items.quantity',
+          },
+        },
+        { $group: { _id: '$day', total: { $sum: '$qty' } } },
+      ])
+      .exec()) as Array<{ _id: string; total: number }>;
+
+    const receivedByDay = new Map(
+      receivedRows.map((row) => [row._id, row.total ?? 0]),
+    );
+    const dispatchedOutByDay = new Map(
+      dispatchedOutRows.map((row) => [row._id, row.total ?? 0]),
+    );
+    const expenseByDay = new Map(
+      expenseRows.map((row) => [row._id, row.total ?? 0]),
+    );
+
+    return { receivedByDay, dispatchedOutByDay, expenseByDay };
+  }
+
+  private async getNetBalanceBefore(
+    structureObjectId: Types.ObjectId,
+    before: Date,
+  ) {
+    const [receivedBeforeAgg] = (await this.dispatchModel
+      .aggregate([
+        {
+          $match: {
+            status: {
+              $in: [
+                WarehouseDispatchStatus.PARTIALLY_RECEIVED,
+                WarehouseDispatchStatus.COMPLETED,
+              ],
+            },
+            'targetStructure.structureId': structureObjectId,
+            dispatchedAt: { $lt: before },
+          },
+        },
+        { $unwind: '$items' },
+        { $match: { 'items.quantityReceived': { $gt: 0 } } },
+        { $group: { _id: null, total: { $sum: '$items.quantityReceived' } } },
+      ])
+      .exec()) as Array<{ total: number }>;
+
+    const [dispatchedOutBeforeAgg] = (await this.dispatchModel
+      .aggregate([
+        {
+          $match: {
+            $or: [
+              { sourceStructureId: structureObjectId },
+              { 'sourceStructure.structureId': structureObjectId },
+            ],
+            dispatchedAt: { $lt: before },
+          },
+        },
+        { $unwind: '$items' },
+        { $match: { 'items.quantityDispatched': { $gt: 0 } } },
+        { $group: { _id: null, total: { $sum: '$items.quantityDispatched' } } },
+      ])
+      .exec()) as Array<{ total: number }>;
+
+    const [expenseBeforeAgg] = (await this.expenseModel
+      .aggregate([
+        {
+          $match: {
+            structureId: structureObjectId,
+            createdAt: { $lt: before },
+          },
+        },
+        { $unwind: '$items' },
+        { $group: { _id: null, total: { $sum: '$items.quantity' } } },
+      ])
+      .exec()) as Array<{ total: number }>;
+
+    return (
+      (receivedBeforeAgg?.total ?? 0) -
+      (dispatchedOutBeforeAgg?.total ?? 0) -
+      (expenseBeforeAgg?.total ?? 0)
+    );
+  }
+
+  private buildWarehouseAnalyticsPoints(input: {
+    from: Date;
+    dayCount: number;
+    balanceBefore: number;
+    receivedByDay: Map<string, number>;
+    dispatchedOutByDay: Map<string, number>;
+    expenseByDay: Map<string, number>;
+  }) {
+    const points: Array<{
+      label: string;
+      received: number;
+      expensed: number;
+      transferred: number;
+      balance: number;
+    }> = [];
+    let running = input.balanceBefore;
+
+    for (let i = 0; i < input.dayCount; i++) {
+      const dayDate = this.addUtcDays(input.from, i);
+      const key = this.utcDayKey(dayDate);
+      const received = input.receivedByDay.get(key) ?? 0;
+      const transferred = input.dispatchedOutByDay.get(key) ?? 0;
+      const expensed = input.expenseByDay.get(key) ?? 0;
+      const outgoing = transferred + expensed;
+      running += received - outgoing;
+
+      points.push({
+        label: key,
+        received,
+        expensed,
+        transferred,
+        balance: running,
+      });
+    }
+
+    return points;
+  }
+
+  async getStructureWarehouseAnalytics(
+    structureId: string,
+    userId: string,
+    role?: UserRole,
+  ) {
+    await this.assertCanViewAllWarehousesOverview(userId, role);
+
+    if (!Types.ObjectId.isValid(structureId)) {
+      throw new BadRequestException('Tuzilma ID noto‘g‘ri');
+    }
+
+    const structureObjectId = new Types.ObjectId(structureId);
+    const structure = await this.structureModel
+      .findById(structureObjectId)
+      .select('_id hasWarehouse shortName')
+      .exec();
+
+    if (!structure?.hasWarehouse) {
+      throw new NotFoundException('Ombor topilmadi');
+    }
+
+    const [inventoryAgg] = (await this.inventoryModel
+      .aggregate([
+        { $match: { structureId: structureObjectId } },
+        { $group: { _id: null, totalQuantity: { $sum: '$quantity' } } },
+      ])
+      .exec()) as Array<{ totalQuantity: number }>;
+
+    const currentQuantity = inventoryAgg?.totalQuantity ?? 0;
+    const today = this.startOfUtcDay(new Date());
+    const dailyDays = 7;
+    const weeklyWeeks = 8;
+    const monthlyMonths = 6;
+
+    const dailyFrom = this.addUtcDays(today, -(dailyDays - 1));
+    const weekStart = this.startOfUtcWeek(today);
+    const weeklyFrom = this.addUtcDays(weekStart, -(weeklyWeeks - 1) * 7);
+    const monthlyFrom = this.subtractUtcMonths(today, monthlyMonths - 1);
+    const toExclusive = this.addUtcDays(today, 1);
+
+    const earliestFrom = [dailyFrom, weeklyFrom, monthlyFrom].reduce((min, d) =>
+      d.getTime() < min.getTime() ? d : min,
+    );
+
+    const balanceBefore = await this.getNetBalanceBefore(
+      structureObjectId,
+      earliestFrom,
+    );
+    const { receivedByDay, dispatchedOutByDay, expenseByDay } =
+      await this.aggregateWarehouseMovementsByDay(
+        structureObjectId,
+        earliestFrom,
+        toExclusive,
+      );
+
+    const allDailyPoints = this.buildWarehouseAnalyticsPoints({
+      from: earliestFrom,
+      dayCount: Math.round(
+        (toExclusive.getTime() - earliestFrom.getTime()) / (24 * 60 * 60 * 1000),
+      ),
+      balanceBefore,
+      receivedByDay,
+      dispatchedOutByDay,
+      expenseByDay,
+    });
+
+    const dailyPoints = allDailyPoints.slice(-dailyDays);
+
+    const weeklyBuckets = new Map<
+      string,
+      { received: number; expensed: number; transferred: number }
+    >();
+    allDailyPoints.forEach((point) => {
+      const weekKey = this.utcDayKey(
+        this.startOfUtcWeek(new Date(`${point.label}T00:00:00.000Z`)),
+      );
+      const bucket = weeklyBuckets.get(weekKey) ?? {
+        received: 0,
+        expensed: 0,
+        transferred: 0,
+      };
+      bucket.received += point.received;
+      bucket.expensed += point.expensed;
+      bucket.transferred += point.transferred;
+      weeklyBuckets.set(weekKey, bucket);
+    });
+
+    const weeklyPoints = Array.from({ length: weeklyWeeks }).map((_, index) => {
+      const weekDate = this.addUtcDays(weeklyFrom, index * 7);
+      const label = this.utcDayKey(weekDate);
+      const bucket = weeklyBuckets.get(label) ?? {
+        received: 0,
+        expensed: 0,
+        transferred: 0,
+      };
+      const outgoing = bucket.expensed + bucket.transferred;
+      const lastDayOfWeek = this.addUtcDays(weekDate, 6);
+      const lastDayKey = this.utcDayKey(
+        lastDayOfWeek.getTime() > today.getTime() ? today : lastDayOfWeek,
+      );
+      const balance =
+        allDailyPoints.find((p) => p.label === lastDayKey)?.balance ??
+        currentQuantity;
+
+      return {
+        label,
+        received: bucket.received,
+        expensed: bucket.expensed,
+        transferred: bucket.transferred,
+        balance,
+        outgoing,
+      };
+    });
+
+    const monthlyBuckets = new Map<
+      string,
+      { received: number; expensed: number; transferred: number }
+    >();
+    allDailyPoints.forEach((point) => {
+      const monthKey = point.label.slice(0, 7);
+      const bucket = monthlyBuckets.get(monthKey) ?? {
+        received: 0,
+        expensed: 0,
+        transferred: 0,
+      };
+      bucket.received += point.received;
+      bucket.expensed += point.expensed;
+      bucket.transferred += point.transferred;
+      monthlyBuckets.set(monthKey, bucket);
+    });
+
+    const monthlyPoints = Array.from({ length: monthlyMonths }).map((_, index) => {
+      const monthDate = this.subtractUtcMonths(today, monthlyMonths - 1 - index);
+      const label = this.utcMonthKey(monthDate);
+      const bucket = monthlyBuckets.get(label) ?? {
+        received: 0,
+        expensed: 0,
+        transferred: 0,
+      };
+      const outgoing = bucket.expensed + bucket.transferred;
+      const balance =
+        [...allDailyPoints].reverse().find((p) => p.label.startsWith(label))?.balance ??
+        currentQuantity;
+
+      return {
+        label,
+        received: bucket.received,
+        expensed: bucket.expensed,
+        transferred: bucket.transferred,
+        balance,
+        outgoing,
+      };
+    });
+
+    return {
+      structureId,
+      currentQuantity,
+      daily: { points: dailyPoints },
+      weekly: { points: weeklyPoints },
+      monthly: { points: monthlyPoints },
+    };
+  }
+
   async listInventoryByAnyLocation(
     locationId: string,
     structureIdRaw: string | undefined,

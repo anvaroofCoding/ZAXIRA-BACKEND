@@ -185,9 +185,44 @@ export class UsersService {
 
   findByLoginWithPassword(login: string): Promise<UserDocument | null> {
     return this.userModel
-      .findOne({ login: login.toLowerCase(), isActive: true })
+      .findOne({ login: login.toLowerCase() })
       .select('+passwordHash')
       .exec();
+  }
+
+  async resolveDeactivatedByInfo(
+    deactivatedBy?: Types.ObjectId | string | null,
+  ) {
+    if (!deactivatedBy) {
+      return null;
+    }
+
+    const actor = await this.findById(String(deactivatedBy));
+
+    if (!actor) {
+      return null;
+    }
+
+    return {
+      id: actor.id,
+      displayName: actor.displayName || actor.login,
+      login: actor.login,
+    };
+  }
+
+  buildDeactivatedLoginMessage(
+    deactivatedBy?: {
+      displayName?: string;
+      login?: string;
+    } | null,
+  ) {
+    const actorName = deactivatedBy?.displayName || deactivatedBy?.login;
+
+    if (actorName) {
+      return `Ruxsat olish zarur. Profil ${actorName} tomonidan nofaol qilingan.`;
+    }
+
+    return 'Ruxsat olish zarur. Profil nofaol qilingan.';
   }
 
   findById(id: string): Promise<UserDocument | null> {
@@ -520,7 +555,15 @@ export class UsersService {
     }
 
     if (dto.isActive !== undefined) {
-      user.isActive = dto.isActive;
+      if (dto.isActive) {
+        user.isActive = true;
+        user.deactivatedBy = undefined;
+        user.deactivatedAt = null;
+      } else if (user.isActive) {
+        user.isActive = false;
+        user.deactivatedBy = new Types.ObjectId(requesterId);
+        user.deactivatedAt = new Date();
+      }
     }
 
     if (dto.password) {
@@ -580,6 +623,8 @@ export class UsersService {
     }
 
     user.isActive = false;
+    user.deactivatedBy = new Types.ObjectId(requesterId);
+    user.deactivatedAt = new Date();
     await user.save();
 
     return { success: true };

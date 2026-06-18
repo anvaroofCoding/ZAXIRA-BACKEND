@@ -10,6 +10,7 @@ import {
   Patch,
   Post,
   Query,
+  Req,
   StreamableFile,
   UploadedFile,
   UploadedFiles,
@@ -23,6 +24,7 @@ import {
   FilesInterceptor,
 } from '@nestjs/platform-express';
 import { memoryStorage } from 'multer';
+import type { Request } from 'express';
 import { createReadStream } from 'fs';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { SkipTransform } from '../../common/decorators/skip-transform.decorator';
@@ -42,6 +44,7 @@ import { CompletePurchaseInput } from './types/complete-purchase-input.type';
 import { ResubmitPurchaseRequestDto } from './dto/resubmit-purchase-request.dto';
 import { MarkItemsUnavailableDto } from './dto/mark-items-unavailable.dto';
 import { RejectPurchaseDto } from './dto/reject-purchase.dto';
+import { UpdatePurchaseBatchContractDto } from './dto/update-purchase-batch-contract.dto';
 import { UpdatePurchaseRequestDto } from './dto/update-purchase-request.dto';
 import { SubmitApprovalDecisionDto } from './dto/submit-approval-decision.dto';
 import { OnlyOfficeService } from './onlyoffice.service';
@@ -554,6 +557,23 @@ export class PurchaseRequestsController {
     });
   }
 
+  @Patch(':id/purchase-batches/:batchId/contract')
+  @Post(':id/purchase-batches/:batchId/contract')
+  updatePurchaseBatchContract(
+    @Param('id', ParseMongoIdPipe) id: string,
+    @Param('batchId') batchId: string,
+    @Body() dto: UpdatePurchaseBatchContractDto,
+    @CurrentUser() user: JwtPayload,
+  ) {
+    return this.purchaseRequestsService.updatePurchaseBatchContract(
+      id,
+      batchId,
+      dto,
+      user.sub,
+      user.role,
+    );
+  }
+
   @Get(':id/purchase/files/:storedName')
   @SkipTransform()
   async downloadPurchaseFile(
@@ -618,7 +638,12 @@ export class PurchaseRequestsController {
   )
   completePurchase(
     @Param('id', ParseMongoIdPipe) id: string,
+    @Req() req: Request,
     @Body('vendorName') vendorName: string | undefined,
+    @Body('contractNumber') contractNumber: string | undefined,
+    @Body('organizationName') organizationName: string | undefined,
+    @Body('innOrPinfl') innOrPinfl: string | undefined,
+    @Body('innOrPinflType') innOrPinflType: string | undefined,
     @Body('comment') comment: string | undefined,
     @Body('links') linksJson: string | undefined,
     @Body('purchasedItems') purchasedItemsJson: string | undefined,
@@ -626,12 +651,17 @@ export class PurchaseRequestsController {
     @UploadedFiles() files: Express.Multer.File[] | undefined,
     @CurrentUser() user: JwtPayload,
   ) {
+    const body = (req.body ?? {}) as Record<string, string | undefined>;
     const input = this.parseCompletePurchaseBody({
-      vendorName,
-      comment,
-      linksJson,
-      purchasedItemsJson,
-      fileLabelsJson,
+      vendorName: vendorName ?? body.vendorName,
+      contractNumber: contractNumber ?? body.contractNumber,
+      organizationName: organizationName ?? body.organizationName,
+      innOrPinfl: innOrPinfl ?? body.innOrPinfl,
+      innOrPinflType: innOrPinflType ?? body.innOrPinflType,
+      comment: comment ?? body.comment,
+      linksJson: linksJson ?? body.links,
+      purchasedItemsJson: purchasedItemsJson ?? body.purchasedItems,
+      fileLabelsJson: fileLabelsJson ?? body.fileLabels,
     });
 
     return this.purchaseRequestsService.completePurchase(
@@ -915,6 +945,10 @@ export class PurchaseRequestsController {
 
   private parseCompletePurchaseBody(raw: {
     vendorName?: string;
+    contractNumber?: string;
+    organizationName?: string;
+    innOrPinfl?: string;
+    innOrPinflType?: string;
     comment?: string;
     linksJson?: string;
     purchasedItemsJson?: string;
@@ -966,9 +1000,40 @@ export class PurchaseRequestsController {
         );
       }
 
+      const rawVatRate = rawRow.vatRate;
+      const vatRate =
+        rawVatRate == null || rawVatRate === ''
+          ? 0
+          : Number(rawVatRate);
+      const rawVatAmount = rawRow.vatAmount;
+      const vatAmount =
+        rawVatAmount == null || rawVatAmount === ''
+          ? 0
+          : Number(rawVatAmount);
+
+      if (!Number.isFinite(vatRate) || ![0, 6, 12].includes(vatRate)) {
+        throw new BadRequestException(
+          `${index + 1}-tovar INDS foizi noto‘g‘ri`,
+        );
+      }
+
+      if (!Number.isFinite(vatAmount) || vatAmount < 0) {
+        throw new BadRequestException(
+          `${index + 1}-tovar INDS summasi noto‘g‘ri`,
+        );
+      }
+
+      if (vatRate > 0 && vatAmount < 1) {
+        throw new BadRequestException(
+          `${index + 1}-tovar uchun INDS summasini kiriting`,
+        );
+      }
+
       return {
         itemIndex: Number(rawRow.itemIndex),
         amount: Number(rawRow.amount),
+        vatRate,
+        vatAmount: Math.round(vatAmount),
         name: typeof rawRow.name === 'string' ? rawRow.name : undefined,
         characteristics:
           typeof rawRow.characteristics === 'string'
@@ -981,10 +1046,26 @@ export class PurchaseRequestsController {
 
     return {
       vendorName: raw.vendorName?.trim() ?? '',
+      contractNumber: raw.contractNumber?.trim() ?? '',
+      organizationName: raw.organizationName?.trim() ?? '',
+      innOrPinfl: raw.innOrPinfl?.trim() ?? '',
+      innOrPinflType: this.normalizeInnOrPinflType(raw.innOrPinflType),
       comment: raw.comment,
       links,
       purchasedItems: normalizedPurchasedItems,
       fileLabels,
     };
+  }
+
+  private normalizeInnOrPinflType(
+    value: string | undefined,
+  ): '' | 'inn' | 'pinfl' {
+    const normalized = value?.trim().toLowerCase();
+
+    if (normalized === 'inn' || normalized === 'pinfl') {
+      return normalized;
+    }
+
+    return '';
   }
 }

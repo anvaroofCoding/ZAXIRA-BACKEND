@@ -987,12 +987,16 @@ export class WarehouseDispatchesService {
         return {
           itemIndex,
           name: item.name,
-          characteristics: item.characteristics,
+          characteristics: '',
           quantityDispatched: item.quantity,
           quantityReceived: 0,
           quantityRejected: 0,
           rejectReason: '',
-          unitPrice: Math.max(0, Math.round(Number(item.purchaseAmount) || 0)),
+          unitPrice: Math.max(
+            0,
+            Math.round(Number(item.purchaseAmount) || 0) +
+              Math.round(Number(item.purchaseVatAmount) || 0),
+          ),
         };
       }),
       plannedArrivalAt,

@@ -36,6 +36,45 @@ export class NotificationsEventsService {
     private readonly usersService: UsersService,
   ) {}
 
+  async notifyDeactivatedProfileLoginAttempt(
+    userId: string,
+    deactivatedBy?: {
+      id?: string;
+      displayName?: string;
+      login?: string;
+    } | null,
+  ) {
+    const actorName = deactivatedBy?.displayName || deactivatedBy?.login;
+    const inputs: CreateNotificationInput[] = [
+      {
+        userId,
+        type: NotificationType.PROFILE_DEACTIVATED,
+        title: 'Ruxsat olish zarur',
+        message: actorName
+          ? `Profil ${actorName} tomonidan nofaol qilingan. Tizimga kirish uchun ruxsat olish zarur.`
+          : 'Profil nofaol qilingan. Tizimga kirish uchun ruxsat olish zarur.',
+        linkPath: '/',
+        entityId: deactivatedBy?.id ?? '',
+      },
+    ];
+
+    if (deactivatedBy?.id) {
+      const user = await this.usersService.findById(userId);
+      const login = user?.displayName || user?.login || 'foydalanuvchi';
+
+      inputs.push({
+        userId: deactivatedBy.id,
+        type: NotificationType.PROFILE_DEACTIVATED,
+        title: 'Nofaol profilga kirish urinishi',
+        message: `${login} nofaol profil bilan tizimga kirishga urindi`,
+        linkPath: '/royxatga-olish/foydalanuvchilar',
+        entityId: userId,
+      });
+    }
+
+    await this.notificationsService.createMany(inputs);
+  }
+
   async notifyPurchaseRequestCommissionRejection(
     request: PurchaseRequestDocument,
   ) {

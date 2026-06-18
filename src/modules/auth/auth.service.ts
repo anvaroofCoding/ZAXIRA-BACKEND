@@ -8,6 +8,7 @@ import {
 import { JwtService } from '@nestjs/jwt';
 import type { Request } from 'express';
 import { RealtimeGateway } from '../realtime/realtime.gateway';
+import { NotificationsEventsService } from '../notifications/notifications-events.service';
 import { UsersService } from '../users/users.service';
 import { ChangePasswordDto } from './dto/change-password.dto';
 import { LoginDto } from './dto/login.dto';
@@ -26,6 +27,8 @@ export class AuthService {
     private readonly userDevicesService: UserDevicesService,
     @Inject(forwardRef(() => RealtimeGateway))
     private readonly realtimeGateway: RealtimeGateway,
+    @Inject(forwardRef(() => NotificationsEventsService))
+    private readonly notificationsEvents: NotificationsEventsService,
   ) {}
 
   extractDeviceMeta(
@@ -101,6 +104,25 @@ export class AuthService {
       await user.save();
     }
 
+    if (!user.isActive) {
+      const deactivatedBy = await this.usersService.resolveDeactivatedByInfo(
+        user.deactivatedBy,
+      );
+      const message =
+        this.usersService.buildDeactivatedLoginMessage(deactivatedBy);
+
+      void this.notificationsEvents.notifyDeactivatedProfileLoginAttempt(
+        user.id,
+        deactivatedBy,
+      );
+
+      throw new ForbiddenException({
+        message,
+        code: 'PROFILE_DEACTIVATED',
+        deactivatedBy,
+      });
+    }
+
     const payload: JwtPayload = {
       sub: user.id,
       login: user.login,
@@ -123,8 +145,20 @@ export class AuthService {
   async getProfile(userId: string, deviceMeta?: DeviceMeta) {
     const user = await this.usersService.findByIdWithStructure(userId);
 
-    if (!user || !user.isActive) {
+    if (!user) {
       throw new UnauthorizedException('Foydalanuvchi topilmadi');
+    }
+
+    if (!user.isActive) {
+      const deactivatedBy = await this.usersService.resolveDeactivatedByInfo(
+        user.deactivatedBy,
+      );
+
+      throw new UnauthorizedException({
+        message: this.usersService.buildDeactivatedLoginMessage(deactivatedBy),
+        code: 'PROFILE_DEACTIVATED',
+        deactivatedBy,
+      });
     }
 
     return this.enrichAuthProfile(

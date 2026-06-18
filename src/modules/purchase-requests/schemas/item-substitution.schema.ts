@@ -50,6 +50,12 @@ export class ItemSubstitutionEmbeddable {
 
   @Prop({ required: true, min: 1 })
   amount!: number;
+
+  @Prop({ min: 0, max: 12, default: 0 })
+  vatRate?: number;
+
+  @Prop({ min: 0, default: 0 })
+  vatAmount?: number;
 }
 
 export const ItemSubstitutionSchema = SchemaFactory.createForClass(

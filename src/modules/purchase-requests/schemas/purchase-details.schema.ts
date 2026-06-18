@@ -47,6 +47,12 @@ export class PurchaseItemAmountEmbeddable {
 
   @Prop({ required: true, min: 1 })
   amount!: number;
+
+  @Prop({ min: 0, max: 12, default: 0 })
+  vatRate!: number;
+
+  @Prop({ min: 0, default: 0 })
+  vatAmount!: number;
 }
 
 export const PurchaseItemAmountSchema = SchemaFactory.createForClass(
@@ -66,6 +72,18 @@ export class PurchaseDetailsEmbeddable {
 
   @Prop({ trim: true, default: '' })
   comment!: string;
+
+  @Prop({ trim: true, default: '' })
+  contractNumber!: string;
+
+  @Prop({ trim: true, default: '' })
+  organizationName!: string;
+
+  @Prop({ trim: true, default: '' })
+  innOrPinfl!: string;
+
+  @Prop({ trim: true, default: '' })
+  innOrPinflType!: string;
 
   @Prop({ type: [PurchaseItemAmountSchema], required: true })
   itemAmounts!: PurchaseItemAmountEmbeddable[];
@@ -94,6 +112,18 @@ export class PurchaseBatchEmbeddable {
 
   @Prop({ trim: true, default: '' })
   comment!: string;
+
+  @Prop({ trim: true, default: '' })
+  contractNumber!: string;
+
+  @Prop({ trim: true, default: '' })
+  organizationName!: string;
+
+  @Prop({ trim: true, default: '' })
+  innOrPinfl!: string;
+
+  @Prop({ trim: true, default: '' })
+  innOrPinflType!: string;
 
   @Prop({ type: [PurchaseLinkSchema], default: [] })
   links!: PurchaseLinkEmbeddable[];

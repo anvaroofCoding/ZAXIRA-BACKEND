@@ -83,6 +83,18 @@ export class WarehouseController {
     return this.warehouseService.listAllWarehousesOverview(user.sub, user.role);
   }
 
+  @Get('all/structures/:structureId/analytics')
+  getStructureWarehouseAnalytics(
+    @Param('structureId', ParseMongoIdPipe) structureId: string,
+    @CurrentUser() user: JwtPayload,
+  ) {
+    return this.warehouseService.getStructureWarehouseAnalytics(
+      structureId,
+      user.sub,
+      user.role,
+    );
+  }
+
   @Get('all/locations/:id/inventory')
   listInventoryFromAllWarehouses(
     @Param('id', ParseMongoIdPipe) id: string,

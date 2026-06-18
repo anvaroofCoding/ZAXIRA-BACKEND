@@ -77,10 +77,12 @@ export class WarehouseDispatchDocumentService {
       doc.font('regular');
 
       dispatch.items.forEach((item, index) => {
-        doc.text(
-          `${index + 1}. ${item.name} — ${item.characteristics} — ${item.quantityDispatched} ta`,
-        );
-      });
+        const characteristics = item.characteristics?.trim()
+        const line = characteristics
+          ? `${index + 1}. ${item.name} — ${characteristics} — ${item.quantityDispatched} ta`
+          : `${index + 1}. ${item.name} — ${item.quantityDispatched} ta`
+        doc.text(line)
+      })
 
       doc.end();
     });
@@ -100,6 +102,9 @@ export class WarehouseDispatchDocumentService {
     const WidthType = docx.WidthType as Record<string, string>;
 
     const org = this.getOrganizationName();
+    const showCharacteristics = dispatch.items.some((item) =>
+      item.characteristics?.trim(),
+    );
     const rows = dispatch.items.map(
       (item, index) =>
         new TableRow({
@@ -110,9 +115,13 @@ export class WarehouseDispatchDocumentService {
             new TableCell({
               children: [new Paragraph(item.name)],
             }),
-            new TableCell({
-              children: [new Paragraph(item.characteristics)],
-            }),
+            ...(showCharacteristics
+              ? [
+                  new TableCell({
+                    children: [new Paragraph(item.characteristics?.trim() || '—')],
+                  }),
+                ]
+              : []),
             new TableCell({
               children: [new Paragraph(String(item.quantityDispatched))],
             }),
@@ -156,7 +165,9 @@ export class WarehouseDispatchDocumentService {
                   children: [
                     new TableCell({ children: [new Paragraph('T/R')] }),
                     new TableCell({ children: [new Paragraph('Tovar')] }),
-                    new TableCell({ children: [new Paragraph('Xususiyat')] }),
+                    ...(showCharacteristics
+                      ? [new TableCell({ children: [new Paragraph('Xususiyat')] })]
+                      : []),
                     new TableCell({ children: [new Paragraph('Soni')] }),
                   ],
                 }),

@@ -4,6 +4,7 @@ import { JwtModule, JwtModuleOptions } from '@nestjs/jwt';
 import { MongooseModule } from '@nestjs/mongoose';
 import type { StringValue } from 'ms';
 import { PassportModule } from '@nestjs/passport';
+import { NotificationsModule } from '../notifications/notifications.module';
 import { RealtimeModule } from '../realtime/realtime.module';
 import { UsersModule } from '../users/users.module';
 import { AuthController } from './auth.controller';
@@ -19,6 +20,7 @@ import { UserDevicesService } from './user-devices.service';
   imports: [
     forwardRef(() => UsersModule),
     forwardRef(() => RealtimeModule),
+    forwardRef(() => NotificationsModule),
     MongooseModule.forFeature([
       { name: UserDeviceSession.name, schema: UserDeviceSessionSchema },
     ]),

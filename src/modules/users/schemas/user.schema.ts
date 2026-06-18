@@ -52,6 +52,12 @@ export class User {
   @Prop({ type: Types.ObjectId, ref: 'User', index: true })
   createdBy?: Types.ObjectId;
 
+  @Prop({ type: Types.ObjectId, ref: 'User', index: true })
+  deactivatedBy?: Types.ObjectId;
+
+  @Prop({ type: Date, default: null })
+  deactivatedAt?: Date | null;
+
   @Prop({ type: Date, default: null })
   lastOnline?: Date | null;
 

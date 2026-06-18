@@ -59,6 +59,21 @@ export class HistoryStepEmbeddable {
 
   @Prop({ type: [ItemSubstitutionSchema], default: [] })
   itemSubstitutions?: ItemSubstitutionEmbeddable[];
+
+  @Prop({ trim: true, default: '' })
+  purchaseBatchId?: string;
+
+  @Prop({ trim: true, default: '' })
+  contractNumber?: string;
+
+  @Prop({ trim: true, default: '' })
+  organizationName?: string;
+
+  @Prop({ trim: true, default: '' })
+  innOrPinfl?: string;
+
+  @Prop({ trim: true, default: '' })
+  innOrPinflType?: string;
 }
 
 export const HistoryStepSchema = SchemaFactory.createForClass(

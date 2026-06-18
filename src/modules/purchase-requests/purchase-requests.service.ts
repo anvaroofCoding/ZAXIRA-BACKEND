@@ -1837,6 +1837,8 @@ export class PurchaseRequestsService implements OnModuleInit {
         unit: item.unit ?? '',
         manufacturingCountry: item.manufacturingCountry ?? '',
         purchaseAmount: item.purchaseAmount ?? null,
+        purchaseVatRate: item.purchaseVatRate ?? 0,
+        purchaseVatAmount: item.purchaseVatAmount ?? 0,
         isPurchased: Boolean(item.isPurchased),
         purchasedAt: item.purchasedAt ?? null,
         purchaseBatchId: item.purchaseBatchId ?? null,
@@ -1932,6 +1934,11 @@ export class PurchaseRequestsService implements OnModuleInit {
           deliveredUnit: row.deliveredUnit ?? '',
           amount: row.amount,
         })),
+        purchaseBatchId: step.purchaseBatchId ?? '',
+        contractNumber: step.contractNumber ?? '',
+        organizationName: step.organizationName ?? '',
+        innOrPinfl: step.innOrPinfl ?? '',
+        innOrPinflType: step.innOrPinflType ?? '',
         createdAt: step.createdAt,
       })),
       bossConfirmedAt: this.shouldExposeBossDecision(request)
@@ -1980,7 +1987,8 @@ export class PurchaseRequestsService implements OnModuleInit {
             }
 
             const unit = item.purchaseAmount ?? 0;
-            return sum + unit * item.quantity;
+            const vat = item.purchaseVatAmount ?? 0;
+            return sum + (unit + vat) * item.quantity;
           }, 0)
         : null,
       canDispatchToWarehouse: warehouseMeta?.canDispatchToWarehouse ?? false,
@@ -2129,6 +2137,10 @@ export class PurchaseRequestsService implements OnModuleInit {
   private mapPurchasePublic(purchase: PurchaseDetailsEmbeddable) {
     return {
       vendorName: purchase.vendorName,
+      contractNumber: purchase.contractNumber ?? '',
+      organizationName: purchase.organizationName ?? '',
+      innOrPinfl: purchase.innOrPinfl ?? '',
+      innOrPinflType: purchase.innOrPinflType ?? '',
       links: purchase.links.map((link) => ({
         label: link.label || '',
         url: link.url,
@@ -2144,6 +2156,8 @@ export class PurchaseRequestsService implements OnModuleInit {
       itemAmounts: purchase.itemAmounts.map((row) => ({
         itemIndex: row.itemIndex,
         amount: row.amount,
+        vatRate: row.vatRate ?? 0,
+        vatAmount: row.vatAmount ?? 0,
       })),
       purchasedBy: {
         userId: String(purchase.purchasedById),
@@ -2154,9 +2168,84 @@ export class PurchaseRequestsService implements OnModuleInit {
     };
   }
 
-  private mapPurchaseBatchPublic(batch: PurchaseBatchEmbeddable) {
+  private resolveContractInfoFromHistory(
+    request: PurchaseRequestDocument,
+    batchId?: string,
+  ):
+    | Pick<
+        PurchaseDetailsEmbeddable,
+        'contractNumber' | 'organizationName' | 'innOrPinfl' | 'innOrPinflType'
+      >
+    | undefined {
+    const steps = [...(request.history ?? [])]
+      .filter(
+        (step) =>
+          (step.type === HistoryStepType.PURCHASED ||
+            step.type === HistoryStepType.PARTIAL_PURCHASE) &&
+          (!batchId || step.purchaseBatchId === batchId),
+      )
+      .sort(
+        (left, right) =>
+          new Date(right.createdAt).getTime() -
+          new Date(left.createdAt).getTime(),
+      );
+
+    for (const step of steps) {
+      if (
+        step.contractNumber?.trim() ||
+        step.organizationName?.trim() ||
+        step.innOrPinfl?.trim()
+      ) {
+        return {
+          contractNumber: step.contractNumber ?? '',
+          organizationName: step.organizationName ?? '',
+          innOrPinfl: step.innOrPinfl ?? '',
+          innOrPinflType: step.innOrPinflType ?? '',
+        };
+      }
+    }
+
+    return undefined;
+  }
+
+  private mapPurchaseBatchPublic(
+    batch: PurchaseBatchEmbeddable,
+    contractFallback?: Pick<
+      PurchaseDetailsEmbeddable,
+      'contractNumber' | 'organizationName' | 'innOrPinfl' | 'innOrPinflType'
+    >,
+    historyFallback?: Pick<
+      PurchaseDetailsEmbeddable,
+      'contractNumber' | 'organizationName' | 'innOrPinfl' | 'innOrPinflType'
+    >,
+  ) {
+    const contractNumber =
+      batch.contractNumber?.trim() ||
+      historyFallback?.contractNumber?.trim() ||
+      contractFallback?.contractNumber?.trim() ||
+      '';
+    const organizationName =
+      batch.organizationName?.trim() ||
+      historyFallback?.organizationName?.trim() ||
+      contractFallback?.organizationName?.trim() ||
+      '';
+    const innOrPinfl =
+      batch.innOrPinfl?.trim() ||
+      historyFallback?.innOrPinfl?.trim() ||
+      contractFallback?.innOrPinfl?.trim() ||
+      '';
+    const innOrPinflType =
+      batch.innOrPinflType?.trim() ||
+      historyFallback?.innOrPinflType?.trim() ||
+      contractFallback?.innOrPinflType?.trim() ||
+      '';
+
     return {
       batchId: batch.batchId,
+      contractNumber,
+      organizationName,
+      innOrPinfl,
+      innOrPinflType,
       comment: batch.comment,
       links: batch.links.map((link) => ({
         label: link.label || '',
@@ -2172,6 +2261,8 @@ export class PurchaseRequestsService implements OnModuleInit {
       itemAmounts: batch.itemAmounts.map((row) => ({
         itemIndex: row.itemIndex,
         amount: row.amount,
+        vatRate: row.vatRate ?? 0,
+        vatAmount: row.vatAmount ?? 0,
       })),
       itemSubstitutions: (batch.itemSubstitutions ?? []).map((row) => ({
         itemIndex: row.itemIndex,
@@ -2184,6 +2275,8 @@ export class PurchaseRequestsService implements OnModuleInit {
         deliveredQuantity: row.deliveredQuantity,
         deliveredUnit: row.deliveredUnit ?? '',
         amount: row.amount,
+        vatRate: row.vatRate ?? 0,
+        vatAmount: row.vatAmount ?? 0,
       })),
       purchasedBy: {
         userId: String(batch.purchasedById),
@@ -2204,7 +2297,13 @@ export class PurchaseRequestsService implements OnModuleInit {
             new Date(right.purchasedAt).getTime() -
             new Date(left.purchasedAt).getTime(),
         )
-        .map((batch) => this.mapPurchaseBatchPublic(batch));
+        .map((batch) =>
+          this.mapPurchaseBatchPublic(
+            batch,
+            request.purchase,
+            this.resolveContractInfoFromHistory(request, batch.batchId),
+          ),
+        );
     }
 
     if (!request.purchase) {
@@ -2223,11 +2322,17 @@ export class PurchaseRequestsService implements OnModuleInit {
       this.mapPurchaseBatchPublic({
         batchId: 'legacy',
         comment: request.purchase.comment ?? '',
+        contractNumber: request.purchase.contractNumber ?? '',
+        organizationName: request.purchase.organizationName ?? '',
+        innOrPinfl: request.purchase.innOrPinfl ?? '',
+        innOrPinflType: request.purchase.innOrPinflType ?? '',
         links: request.purchase.links ?? [],
         files: request.purchase.files ?? [],
         itemAmounts: purchasedItems.map(({ item, itemIndex }) => ({
           itemIndex,
           amount: item.purchaseAmount ?? 0,
+          vatRate: item.purchaseVatRate ?? 0,
+          vatAmount: item.purchaseVatAmount ?? 0,
         })),
         itemSubstitutions: purchasedItems
           .filter(({ item }) => item.originalRequestedItem)
@@ -2242,6 +2347,8 @@ export class PurchaseRequestsService implements OnModuleInit {
             deliveredQuantity: item.quantity,
             deliveredUnit: item.unit ?? '',
             amount: item.purchaseAmount ?? 0,
+            vatRate: item.purchaseVatRate ?? 0,
+            vatAmount: item.purchaseVatAmount ?? 0,
           })),
         purchasedById: request.purchase.purchasedById,
         purchasedByDisplayName: request.purchase.purchasedByDisplayName,
@@ -3407,7 +3514,12 @@ export class PurchaseRequestsService implements OnModuleInit {
       input.fileLabels ?? [],
     );
 
-    const newItemAmounts: Array<{ itemIndex: number; amount: number }> = [];
+    const newItemAmounts: Array<{
+      itemIndex: number;
+      amount: number;
+      vatRate: number;
+      vatAmount: number;
+    }> = [];
     const remainingItemsToInsert: Array<{
       afterIndex: number;
       item: {
@@ -3439,6 +3551,8 @@ export class PurchaseRequestsService implements OnModuleInit {
           : originalSnapshot.quantity;
       const nextUnit = row.unit?.trim() ?? originalSnapshot.unit;
       const amount = Math.round(row.amount);
+      const vatRate = Math.round(row.vatRate ?? 0);
+      const vatAmount = Math.round(row.vatAmount ?? 0);
       const isPartialQuantity = purchasedQuantity < originalSnapshot.quantity;
 
       if (isPartialQuantity) {
@@ -3479,6 +3593,8 @@ export class PurchaseRequestsService implements OnModuleInit {
           deliveredQuantity: purchasedQuantity,
           deliveredUnit: nextUnit,
           amount,
+          vatRate,
+          vatAmount,
         });
       }
 
@@ -3487,11 +3603,13 @@ export class PurchaseRequestsService implements OnModuleInit {
       item.quantity = purchasedQuantity;
       item.unit = nextUnit;
       item.purchaseAmount = amount;
+      item.purchaseVatRate = vatRate;
+      item.purchaseVatAmount = vatAmount;
       item.isPurchased = true;
       item.purchasedAt = now;
       item.purchaseBatchId = batchId;
 
-      newItemAmounts.push({ itemIndex: row.itemIndex, amount });
+      newItemAmounts.push({ itemIndex: row.itemIndex, amount, vatRate, vatAmount });
     }
 
     remainingItemsToInsert
@@ -3505,6 +3623,10 @@ export class PurchaseRequestsService implements OnModuleInit {
     const purchaseBatch: PurchaseBatchEmbeddable = {
       batchId,
       comment: input.comment?.trim() ?? '',
+      contractNumber: input.contractNumber?.trim() ?? '',
+      organizationName: input.organizationName?.trim() ?? '',
+      innOrPinfl: input.innOrPinfl?.trim() ?? '',
+      innOrPinflType: input.innOrPinflType ?? '',
       links,
       files: savedFiles,
       itemAmounts: newItemAmounts,
@@ -3528,6 +3650,13 @@ export class PurchaseRequestsService implements OnModuleInit {
 
     request.purchase = {
       vendorName: vendorName || existingPurchase?.vendorName || '',
+      contractNumber:
+        input.contractNumber?.trim() || existingPurchase?.contractNumber || '',
+      organizationName:
+        input.organizationName?.trim() || existingPurchase?.organizationName || '',
+      innOrPinfl: input.innOrPinfl?.trim() || existingPurchase?.innOrPinfl || '',
+      innOrPinflType:
+        input.innOrPinflType || existingPurchase?.innOrPinflType || '',
       links: mergedLinks,
       files: mergedFiles,
       comment: input.comment?.trim() || existingPurchase?.comment || '',
@@ -3537,6 +3666,7 @@ export class PurchaseRequestsService implements OnModuleInit {
       purchasedByLogin: purchaser.login,
       purchasedAt: now,
     };
+    request.markModified('purchase');
 
     const allResolved = this.areAllItemsResolved(request);
     request.status = allResolved
@@ -3553,6 +3683,11 @@ export class PurchaseRequestsService implements OnModuleInit {
       comment: input.comment?.trim() ?? '',
       purchasedItemIndexes: [...purchasedIndexes],
       itemSubstitutions,
+      purchaseBatchId: batchId,
+      contractNumber: input.contractNumber?.trim() ?? '',
+      organizationName: input.organizationName?.trim() ?? '',
+      innOrPinfl: input.innOrPinfl?.trim() ?? '',
+      innOrPinflType: input.innOrPinflType ?? '',
       createdAt: now,
     });
     request.markModified('history');
@@ -3562,6 +3697,141 @@ export class PurchaseRequestsService implements OnModuleInit {
     this.emitPurchaseRequestChanged(request, 'updated');
 
     return this.toPublic(request, userId);
+  }
+
+  async updatePurchaseBatchContract(
+    id: string,
+    batchId: string,
+    dto: {
+      contractNumber?: string;
+      organizationName?: string;
+      innOrPinfl?: string;
+      innOrPinflType?: '' | 'inn' | 'pinfl';
+    },
+    userId: string,
+    role?: UserRole,
+  ) {
+    const request = await this.findByIdOrFail(id, userId, role, {
+      purchasingView: true,
+    });
+
+    const batch =
+      (request.purchaseBatches ?? []).find(
+        (entry) => entry.batchId === batchId,
+      ) ?? null;
+
+    const contractNumber = dto.contractNumber?.trim() ?? '';
+    const organizationName = dto.organizationName?.trim() ?? '';
+    const innOrPinfl = dto.innOrPinfl?.trim() ?? '';
+    const innOrPinflType = dto.innOrPinflType ?? '';
+
+    if ((innOrPinflType && !innOrPinfl) || (!innOrPinflType && innOrPinfl)) {
+      throw new BadRequestException(
+        'INN yoki PINFL uchun avval turini tanlang, keyin raqamni kiriting',
+      );
+    }
+
+    if (innOrPinflType === 'inn' && innOrPinfl.length !== 9) {
+      throw new BadRequestException('INN 9 ta raqamdan iborat bo‘lishi kerak');
+    }
+
+    if (innOrPinflType === 'pinfl' && innOrPinfl.length !== 14) {
+      throw new BadRequestException(
+        'PINFL 14 ta raqamdan iborat bo‘lishi kerak',
+      );
+    }
+
+    if (!batch) {
+      if (batchId === 'legacy' && request.purchase) {
+        request.purchase.contractNumber = contractNumber;
+        request.purchase.organizationName = organizationName;
+        request.purchase.innOrPinfl = innOrPinfl;
+        request.purchase.innOrPinflType = innOrPinflType;
+        request.markModified('purchase');
+
+        const historyStep = this.findPurchaseHistoryStepForBatch(request, {
+          batchId: 'legacy',
+          purchasedAt: request.purchase.purchasedAt,
+        } as PurchaseBatchEmbeddable);
+
+        if (historyStep) {
+          historyStep.contractNumber = contractNumber;
+          historyStep.organizationName = organizationName;
+          historyStep.innOrPinfl = innOrPinfl;
+          historyStep.innOrPinflType = innOrPinflType;
+          historyStep.purchaseBatchId = 'legacy';
+          request.markModified('history');
+        }
+
+        await request.save();
+        this.emitPurchaseRequestChanged(request, 'updated');
+        return this.toPublic(request, userId);
+      }
+
+      throw new NotFoundException('Xarid partiyasi topilmadi');
+    }
+
+    batch.contractNumber = contractNumber;
+    batch.organizationName = organizationName;
+    batch.innOrPinfl = innOrPinfl;
+    batch.innOrPinflType = innOrPinflType;
+    request.markModified('purchaseBatches');
+
+    if (request.purchase) {
+      request.purchase.contractNumber = contractNumber;
+      request.purchase.organizationName = organizationName;
+      request.purchase.innOrPinfl = innOrPinfl;
+      request.purchase.innOrPinflType = innOrPinflType;
+      request.markModified('purchase');
+    }
+
+    const historyStep = this.findPurchaseHistoryStepForBatch(request, batch);
+    if (historyStep) {
+      historyStep.contractNumber = contractNumber;
+      historyStep.organizationName = organizationName;
+      historyStep.innOrPinfl = innOrPinfl;
+      historyStep.innOrPinflType = innOrPinflType;
+      if (!historyStep.purchaseBatchId) {
+        historyStep.purchaseBatchId = batchId;
+      }
+      request.markModified('history');
+    }
+
+    await request.save();
+
+    this.emitPurchaseRequestChanged(request, 'updated');
+
+    return this.toPublic(request, userId);
+  }
+
+  private findPurchaseHistoryStepForBatch(
+    request: PurchaseRequestDocument,
+    batch: PurchaseBatchEmbeddable,
+  ) {
+    const purchaseSteps = (request.history ?? []).filter(
+      (step) =>
+        step.type === HistoryStepType.PURCHASED ||
+        step.type === HistoryStepType.PARTIAL_PURCHASE,
+    );
+
+    if (!purchaseSteps.length) {
+      return null;
+    }
+
+    const byBatchId = purchaseSteps.find(
+      (step) => step.purchaseBatchId === batch.batchId,
+    );
+    if (byBatchId) {
+      return byBatchId;
+    }
+
+    const batchTime = new Date(batch.purchasedAt).getTime();
+    const byTime = purchaseSteps.find((step) => {
+      const stepTime = new Date(step.createdAt).getTime();
+      return Math.abs(stepTime - batchTime) <= 2000;
+    });
+
+    return byTime ?? purchaseSteps[purchaseSteps.length - 1];
   }
 
   async markItemsUnavailable(

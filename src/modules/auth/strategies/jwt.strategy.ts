@@ -21,10 +21,20 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
   async validate(payload: JwtPayload): Promise<JwtPayload> {
     const user = await this.usersService.findById(payload.sub);
 
-    if (!user?.isActive) {
-      throw new UnauthorizedException(
-        'Foydalanuvchi topilmadi yoki bloklangan',
+    if (!user) {
+      throw new UnauthorizedException('Foydalanuvchi topilmadi');
+    }
+
+    if (!user.isActive) {
+      const deactivatedBy = await this.usersService.resolveDeactivatedByInfo(
+        user.deactivatedBy,
       );
+
+      throw new UnauthorizedException({
+        message: this.usersService.buildDeactivatedLoginMessage(deactivatedBy),
+        code: 'PROFILE_DEACTIVATED',
+        deactivatedBy,
+      });
     }
 
     return {
