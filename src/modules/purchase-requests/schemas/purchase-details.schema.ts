@@ -41,6 +41,28 @@ export const PurchaseFileSchema = SchemaFactory.createForClass(
 );
 
 @Schema({ _id: false })
+export class PurchaseIshonchnomaEmbeddable {
+  @Prop({ type: [PurchaseFileSchema], default: [] })
+  files!: PurchaseFileEmbeddable[];
+
+  @Prop({ type: Types.ObjectId, required: true })
+  uploadedById!: Types.ObjectId;
+
+  @Prop({ required: true, trim: true })
+  uploadedByDisplayName!: string;
+
+  @Prop({ required: true, trim: true })
+  uploadedByLogin!: string;
+
+  @Prop({ required: true })
+  uploadedAt!: Date;
+}
+
+export const PurchaseIshonchnomaSchema = SchemaFactory.createForClass(
+  PurchaseIshonchnomaEmbeddable,
+);
+
+@Schema({ _id: false })
 export class PurchaseItemAmountEmbeddable {
   @Prop({ required: true, min: 0 })
   itemIndex!: number;
@@ -99,6 +121,9 @@ export class PurchaseDetailsEmbeddable {
 
   @Prop({ required: true })
   purchasedAt!: Date;
+
+  @Prop({ type: PurchaseIshonchnomaSchema })
+  ishonchnoma?: PurchaseIshonchnomaEmbeddable;
 }
 
 export const PurchaseDetailsSchema = SchemaFactory.createForClass(
@@ -148,6 +173,9 @@ export class PurchaseBatchEmbeddable {
 
   @Prop({ required: true })
   purchasedAt!: Date;
+
+  @Prop({ type: PurchaseIshonchnomaSchema })
+  ishonchnoma?: PurchaseIshonchnomaEmbeddable;
 }
 
 export const PurchaseBatchSchema = SchemaFactory.createForClass(

@@ -9,7 +9,7 @@ export class DispatchItemEmbeddable {
   @Prop({ required: true, trim: true })
   name!: string;
 
-  @Prop({ required: true, trim: true })
+  @Prop({ trim: true, default: '' })
   characteristics!: string;
 
   @Prop({ required: true, min: 1 })

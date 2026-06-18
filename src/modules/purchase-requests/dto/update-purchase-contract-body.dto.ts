@@ -1,6 +1,10 @@
 import { IsIn, IsNotEmpty, IsString, MaxLength } from 'class-validator';
 
-export class UpdatePurchaseBatchContractDto {
+export class UpdatePurchaseContractBodyDto {
+  @IsNotEmpty()
+  @IsString()
+  batchId!: string;
+
   @IsNotEmpty()
   @IsString()
   @MaxLength(120)

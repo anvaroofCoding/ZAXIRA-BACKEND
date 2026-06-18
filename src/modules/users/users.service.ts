@@ -733,4 +733,35 @@ export class UsersService {
 
     return { success: true };
   }
+
+  async backfillIshonchnomaPermissions(): Promise<number> {
+    const users = await this.userModel
+      .find({ role: { $ne: UserRole.SUPER_ADMIN } })
+      .exec();
+
+    let updated = 0;
+
+    for (const user of users) {
+      const before = JSON.stringify(
+        user.permissions?.['/xarid-qilish/ishonchnoma'] ?? null,
+      );
+      const normalized = normalizePermissions(
+        user.permissions as UserPermissionsMap,
+      );
+      const after = JSON.stringify(
+        normalized['/xarid-qilish/ishonchnoma'] ?? null,
+      );
+
+      if (before === after) {
+        continue;
+      }
+
+      user.permissions = normalized;
+      user.markModified('permissions');
+      await user.save();
+      updated += 1;
+    }
+
+    return updated;
+  }
 }

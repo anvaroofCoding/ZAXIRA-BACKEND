@@ -24,8 +24,15 @@ import { UsersService } from '../users/users.service';
 import { UserPermissionsMap } from '../users/types/page-permission.type';
 import {
   hasPageAction,
+  hasPageAccess,
   normalizePermissions,
 } from '../users/utils/permissions.util';
+import {
+  ISHONCHNOMA_PAGE_PATH,
+  PURCHASED_ITEMS_PAGE_PATH,
+  PURCHASING_QUEUE_PAGE_PATH,
+  WAREHOUSE_RECEIPT_PAGE_PATH,
+} from '../users/constants/disabled-page-actions';
 import {
   PURCHASE_REQUEST_APPROVAL_PATH,
   PURCHASE_REQUEST_SUBMIT_PATH,
@@ -70,6 +77,7 @@ import { Sequence, SequenceDocument } from './schemas/sequence.schema';
 import {
   PurchaseBatchEmbeddable,
   PurchaseDetailsEmbeddable,
+  PurchaseIshonchnomaEmbeddable,
   PurchaseUnavailableBatchEmbeddable,
 } from './schemas/purchase-details.schema';
 import { UserSnapshotEmbeddable } from './schemas/user-snapshot.schema';
@@ -2208,6 +2216,32 @@ export class PurchaseRequestsService implements OnModuleInit {
     return undefined;
   }
 
+  private mapIshonchnomaPublic(
+    ishonchnoma?: PurchaseIshonchnomaEmbeddable | null,
+  ) {
+    const files = ishonchnoma?.files ?? [];
+
+    if (!files.length) {
+      return null;
+    }
+
+    return {
+      files: files.map((file) => ({
+        label: file.label,
+        storedName: file.storedName,
+        originalName: file.originalName,
+        mimeType: file.mimeType,
+        size: file.size,
+      })),
+      uploadedBy: {
+        userId: String(ishonchnoma!.uploadedById),
+        displayName: ishonchnoma!.uploadedByDisplayName,
+        login: ishonchnoma!.uploadedByLogin,
+      },
+      uploadedAt: ishonchnoma!.uploadedAt,
+    };
+  }
+
   private mapPurchaseBatchPublic(
     batch: PurchaseBatchEmbeddable,
     contractFallback?: Pick<
@@ -2284,6 +2318,8 @@ export class PurchaseRequestsService implements OnModuleInit {
         login: batch.purchasedByLogin,
       },
       purchasedAt: batch.purchasedAt,
+      ishonchnoma: this.mapIshonchnomaPublic(batch.ishonchnoma),
+      ishonchnomaSubmitted: Boolean(batch.ishonchnoma?.files?.length),
     };
   }
 
@@ -2354,6 +2390,7 @@ export class PurchaseRequestsService implements OnModuleInit {
         purchasedByDisplayName: request.purchase.purchasedByDisplayName,
         purchasedByLogin: request.purchase.purchasedByLogin,
         purchasedAt: request.purchase.purchasedAt,
+        ishonchnoma: request.purchase.ishonchnoma,
       }),
     ];
   }
@@ -2500,6 +2537,34 @@ export class PurchaseRequestsService implements OnModuleInit {
         'Ushbu ariza xarid qilish bo‘limida ko‘rinmaydi',
       );
     }
+  }
+
+  private async assertCanAccessIshonchnomaFiles(
+    userId: string,
+    role?: UserRole,
+  ) {
+    if (isSuperAdminRole(role)) {
+      return;
+    }
+
+    const user = await this.usersService.findByIdOrFail(userId);
+    const permissions = normalizePermissions(
+      user.permissions as UserPermissionsMap,
+    );
+    const allowedPaths = [
+      WAREHOUSE_RECEIPT_PAGE_PATH,
+      ISHONCHNOMA_PAGE_PATH,
+      PURCHASING_QUEUE_PAGE_PATH,
+      PURCHASED_ITEMS_PAGE_PATH,
+    ];
+
+    if (
+      allowedPaths.some((path) => hasPageAccess(permissions, path, false))
+    ) {
+      return;
+    }
+
+    throw new ForbiddenException('Ishonchnoma faylini ko‘rish huquqi yo‘q');
   }
 
   private buildSearchOr(term: string) {
@@ -3315,6 +3380,49 @@ export class PurchaseRequestsService implements OnModuleInit {
     return clauses.length === 1 ? clauses[0] : { $and: clauses };
   }
 
+  private buildIshonchnomaInboxFilter(
+    query: QueryPurchasingInboxDto,
+  ): Record<string, unknown> {
+    const clauses: Record<string, unknown>[] = [
+      {
+        status: {
+          $in: [
+            PurchaseRequestStatus.PURCHASING,
+            PurchaseRequestStatus.PURCHASED,
+            PurchaseRequestStatus.WAREHOUSE_IN_TRANSIT,
+            PurchaseRequestStatus.WAREHOUSE_COMPLETED,
+          ],
+        },
+      },
+      {
+        $or: [
+          { 'purchaseBatches.0': { $exists: true } },
+          {
+            $and: [
+              { 'items.isPurchased': true },
+              { purchase: { $exists: true } },
+            ],
+          },
+        ],
+      },
+    ];
+
+    appendDateRangeClause(
+      clauses,
+      'purchase.purchasedAt',
+      query.dateFrom,
+      query.dateTo,
+    );
+
+    const term = query.search?.trim();
+
+    if (term) {
+      clauses.push({ $or: this.buildSearchOr(term) });
+    }
+
+    return { $and: clauses };
+  }
+
   async findPurchasedInboxPaginated(
     query: QueryPurchasingInboxDto,
     userId: string,
@@ -3360,6 +3468,146 @@ export class PurchaseRequestsService implements OnModuleInit {
     };
   }
 
+  async findIshonchnomaInboxPaginated(
+    query: QueryPurchasingInboxDto,
+    userId: string,
+    role?: UserRole,
+  ) {
+    const page = query.page ?? 1;
+    const limit = query.limit ?? 10;
+    const statusFilter = query.ishonchnomaStatus ?? 'all';
+    const filter = this.buildIshonchnomaInboxFilter(query);
+
+    const requests = await this.purchaseRequestModel
+      .find(filter)
+      .sort({ 'purchase.purchasedAt': -1, updatedAt: -1 })
+      .exec();
+
+    const rows: Array<{
+      requestId: string;
+      requestCode: string;
+      applicant: {
+        userId: string;
+        displayName: string;
+        login: string;
+      };
+      structure: {
+        shortName: string;
+        fullName: string;
+      } | null;
+      batch: ReturnType<PurchaseRequestsService['mapPurchaseBatchPublic']>;
+      batchNumber: number;
+      items: Array<{
+        name: string;
+        characteristics: string;
+        quantity: number;
+        unit: string;
+        itemIndex: number;
+      }>;
+      ishonchnomaSubmitted: boolean;
+    }> = [];
+
+    for (const request of requests) {
+      const batches = [...this.mapPurchaseBatchesPublic(request)].sort(
+        (left, right) =>
+          new Date(right.purchasedAt).getTime() -
+          new Date(left.purchasedAt).getTime(),
+      );
+
+      batches.forEach((batch, index) => {
+        const submitted = Boolean(batch.ishonchnomaSubmitted);
+
+        if (statusFilter === 'pending' && submitted) {
+          return;
+        }
+
+        if (statusFilter === 'submitted' && !submitted) {
+          return;
+        }
+
+        if (query.dateFrom || query.dateTo) {
+          const purchasedAt = new Date(batch.purchasedAt);
+
+          if (query.dateFrom) {
+            const from = new Date(`${query.dateFrom}T00:00:00.000Z`);
+
+            if (purchasedAt < from) {
+              return;
+            }
+          }
+
+          if (query.dateTo) {
+            const to = new Date(`${query.dateTo}T23:59:59.999Z`);
+
+            if (purchasedAt > to) {
+              return;
+            }
+          }
+        }
+
+        const batchItemIndexes = new Set(
+          batch.itemAmounts.map((row) => row.itemIndex),
+        );
+        const batchItems = request.items
+          .map((item, itemIndex) => ({ item, itemIndex }))
+          .filter(({ item, itemIndex }) => {
+            if (batch.batchId === 'legacy') {
+              return batchItemIndexes.has(itemIndex) && item.isPurchased;
+            }
+
+            return item.purchaseBatchId === batch.batchId;
+          })
+          .map(({ item, itemIndex }) => ({
+            itemIndex,
+            name: item.name,
+            characteristics: item.characteristics,
+            quantity: item.quantity,
+            unit: item.unit ?? '',
+          }));
+
+        rows.push({
+          requestId: String(request._id),
+          requestCode: request.requestCode,
+          applicant: {
+            userId: String(request.applicant.userId),
+            displayName: request.applicant.displayName,
+            login: request.applicant.login,
+          },
+          structure: request.applicantStructure
+            ? {
+                shortName: request.applicantStructure.shortName,
+                fullName:
+                  request.applicantStructure.fullName ??
+                  request.applicantStructure.shortName,
+              }
+            : null,
+          batch,
+          batchNumber: batches.length - index,
+          items: batchItems,
+          ishonchnomaSubmitted: submitted,
+        });
+      });
+    }
+
+    rows.sort(
+      (left, right) =>
+        new Date(right.batch.purchasedAt).getTime() -
+        new Date(left.batch.purchasedAt).getTime(),
+    );
+
+    const total = rows.length;
+    const skip = (page - 1) * limit;
+    const items = rows.slice(skip, skip + limit);
+
+    return {
+      items,
+      total,
+      page,
+      limit,
+      totalPages: Math.max(1, Math.ceil(total / limit)),
+    };
+  }
+
   async getSubmittedDocument(
     requestId: string,
     docType: 'bildirgi' | 'kelishuv',
@@ -3390,17 +3638,45 @@ export class PurchaseRequestsService implements OnModuleInit {
     userId: string,
     role?: UserRole,
   ) {
-    const request = await this.findByIdOrFail(requestId, userId, role, {
-      purchasingView: true,
-    });
+    const request = await this.purchaseRequestModel.findById(requestId).exec();
+
+    if (!request) {
+      throw new NotFoundException('Ariza topilmadi');
+    }
+
+    this.ensureLegacyFields(request);
+
+    const safeName = path.basename(storedName);
+    const isIshonchnomaFile = Boolean(
+      request.purchase?.ishonchnoma?.files.some(
+        (entry) => entry.storedName === safeName,
+      ) ||
+        (request.purchaseBatches ?? []).some((batch) =>
+          (batch.ishonchnoma?.files ?? []).some(
+            (entry) => entry.storedName === safeName,
+          ),
+        ),
+    );
+
+    if (isIshonchnomaFile) {
+      await this.assertCanAccessIshonchnomaFiles(userId, role);
+    } else {
+      await this.findByIdOrFail(requestId, userId, role, {
+        purchasingView: true,
+      });
+    }
 
     const file =
-      request.purchase?.files.find(
-        (entry) => entry.storedName === path.basename(storedName),
-      ) ??
+      request.purchase?.files.find((entry) => entry.storedName === safeName) ??
       (request.purchaseBatches ?? [])
         .flatMap((batch) => batch.files)
-        .find((entry) => entry.storedName === path.basename(storedName));
+        .find((entry) => entry.storedName === safeName) ??
+      request.purchase?.ishonchnoma?.files.find(
+        (entry) => entry.storedName === safeName,
+      ) ??
+      (request.purchaseBatches ?? [])
+        .flatMap((batch) => batch.ishonchnoma?.files ?? [])
+        .find((entry) => entry.storedName === safeName);
 
     if (!file) {
       throw new NotFoundException('Fayl topilmadi');
@@ -3412,6 +3688,31 @@ export class PurchaseRequestsService implements OnModuleInit {
     );
 
     return { file, filePath };
+  }
+
+  getPurchaseBatchIshonchnomaForWarehouse(
+    request: PurchaseRequestDocument,
+    purchaseBatchId?: string,
+  ) {
+    const batches = this.mapPurchaseBatchesPublic(request);
+
+    if (!batches.length) {
+      return {
+        ishonchnoma: null,
+        ishonchnomaSubmitted: false,
+      };
+    }
+
+    const resolvedBatchId = purchaseBatchId?.trim();
+    const batch =
+      (resolvedBatchId
+        ? batches.find((entry) => entry.batchId === resolvedBatchId)
+        : null) ?? batches[0];
+
+    return {
+      ishonchnoma: batch.ishonchnoma,
+      ishonchnomaSubmitted: Boolean(batch.ishonchnomaSubmitted),
+    };
   }
 
   async completePurchase(
@@ -3457,6 +3758,8 @@ export class PurchaseRequestsService implements OnModuleInit {
         'Kamida bitta tovar tanlab xarid qilish kerak',
       );
     }
+
+    this.assertPurchaseContractFields(input);
 
     const purchasedIndexes = new Set<number>();
     const itemSubstitutions: NonNullable<
@@ -3720,26 +4023,12 @@ export class PurchaseRequestsService implements OnModuleInit {
         (entry) => entry.batchId === batchId,
       ) ?? null;
 
+    this.assertPurchaseContractFields(dto);
+
     const contractNumber = dto.contractNumber?.trim() ?? '';
     const organizationName = dto.organizationName?.trim() ?? '';
     const innOrPinfl = dto.innOrPinfl?.trim() ?? '';
     const innOrPinflType = dto.innOrPinflType ?? '';
-
-    if ((innOrPinflType && !innOrPinfl) || (!innOrPinflType && innOrPinfl)) {
-      throw new BadRequestException(
-        'INN yoki PINFL uchun avval turini tanlang, keyin raqamni kiriting',
-      );
-    }
-
-    if (innOrPinflType === 'inn' && innOrPinfl.length !== 9) {
-      throw new BadRequestException('INN 9 ta raqamdan iborat bo‘lishi kerak');
-    }
-
-    if (innOrPinflType === 'pinfl' && innOrPinfl.length !== 14) {
-      throw new BadRequestException(
-        'PINFL 14 ta raqamdan iborat bo‘lishi kerak',
-      );
-    }
 
     if (!batch) {
       if (batchId === 'legacy' && request.purchase) {
@@ -3804,6 +4093,65 @@ export class PurchaseRequestsService implements OnModuleInit {
     return this.toPublic(request, userId);
   }
 
+  async savePurchaseBatchIshonchnoma(
+    id: string,
+    batchId: string,
+    files: Express.Multer.File[],
+    fileLabels: string[],
+    userId: string,
+    role?: UserRole,
+  ) {
+    if (!files.length) {
+      throw new BadRequestException('Kamida bitta fayl yuklash kerak');
+    }
+
+    const request = await this.findByIdOrFail(id, userId, role, {
+      purchasingView: true,
+    });
+    const uploader = await this.usersService.findByIdOrFail(userId);
+    const now = new Date();
+    const savedFiles = await this.purchaseRequestFilesService.saveUploadedFiles(
+      String(request._id),
+      files,
+      fileLabels,
+    );
+
+    const nextIshonchnoma = (
+      existing?: PurchaseIshonchnomaEmbeddable | null,
+    ): PurchaseIshonchnomaEmbeddable => ({
+      files: [...(existing?.files ?? []), ...savedFiles],
+      uploadedById: new Types.ObjectId(userId),
+      uploadedByDisplayName: uploader.displayName || uploader.login,
+      uploadedByLogin: uploader.login,
+      uploadedAt: now,
+    });
+
+    if (batchId === 'legacy') {
+      if (!request.purchase) {
+        throw new NotFoundException('Xarid partiyasi topilmadi');
+      }
+
+      request.purchase.ishonchnoma = nextIshonchnoma(request.purchase.ishonchnoma);
+      request.markModified('purchase');
+    } else {
+      const batch = (request.purchaseBatches ?? []).find(
+        (entry) => entry.batchId === batchId,
+      );
+
+      if (!batch) {
+        throw new NotFoundException('Xarid partiyasi topilmadi');
+      }
+
+      batch.ishonchnoma = nextIshonchnoma(batch.ishonchnoma);
+      request.markModified('purchaseBatches');
+    }
+
+    await request.save();
+    this.emitPurchaseRequestChanged(request, 'updated');
+
+    return this.toPublic(request, userId);
+  }
+
   private findPurchaseHistoryStepForBatch(
     request: PurchaseRequestDocument,
     batch: PurchaseBatchEmbeddable,
@@ -3832,6 +4180,46 @@ export class PurchaseRequestsService implements OnModuleInit {
     });
 
     return byTime ?? purchaseSteps[purchaseSteps.length - 1];
+  }
+
+  private assertPurchaseContractFields(input: {
+    contractNumber?: string;
+    organizationName?: string;
+    innOrPinfl?: string;
+    innOrPinflType?: '' | 'inn' | 'pinfl';
+  }) {
+    const contractNumber = input.contractNumber?.trim() ?? '';
+    const organizationName = input.organizationName?.trim() ?? '';
+    const innOrPinfl = input.innOrPinfl?.trim() ?? '';
+    const innOrPinflType = input.innOrPinflType ?? '';
+
+    if (!contractNumber) {
+      throw new BadRequestException('Shartnoma raqamini kiriting');
+    }
+
+    if (!organizationName) {
+      throw new BadRequestException('Tashkilot nomini kiriting');
+    }
+
+    if (innOrPinflType !== 'inn' && innOrPinflType !== 'pinfl') {
+      throw new BadRequestException(
+        'Identifikator turini tanlang (INN yoki PINFL)',
+      );
+    }
+
+    if (!innOrPinfl) {
+      throw new BadRequestException('INN yoki PINFL raqamini kiriting');
+    }
+
+    if (innOrPinflType === 'inn' && innOrPinfl.length !== 9) {
+      throw new BadRequestException('INN 9 ta raqamdan iborat bo‘lishi kerak');
+    }
+
+    if (innOrPinflType === 'pinfl' && innOrPinfl.length !== 14) {
+      throw new BadRequestException(
+        'PINFL 14 ta raqamdan iborat bo‘lishi kerak',
+      );
+    }
   }
 
   async markItemsUnavailable(

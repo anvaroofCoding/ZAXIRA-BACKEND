@@ -45,6 +45,7 @@ import { ResubmitPurchaseRequestDto } from './dto/resubmit-purchase-request.dto'
 import { MarkItemsUnavailableDto } from './dto/mark-items-unavailable.dto';
 import { RejectPurchaseDto } from './dto/reject-purchase.dto';
 import { UpdatePurchaseBatchContractDto } from './dto/update-purchase-batch-contract.dto';
+import { UpdatePurchaseContractBodyDto } from './dto/update-purchase-contract-body.dto';
 import { UpdatePurchaseRequestDto } from './dto/update-purchase-request.dto';
 import { SubmitApprovalDecisionDto } from './dto/submit-approval-decision.dto';
 import { OnlyOfficeService } from './onlyoffice.service';
@@ -255,6 +256,34 @@ export class PurchaseRequestsController {
       user.sub,
       user.role,
       (ids) => this.buildPurchasedDispatchDetailLoader(ids),
+    );
+  }
+
+  @Get('ishonchnoma/inbox')
+  findIshonchnomaInbox(
+    @Query('page') page: string | undefined,
+    @Query('limit') limit: string | undefined,
+    @Query('search') search: string | undefined,
+    @Query('dateFrom') dateFrom: string | undefined,
+    @Query('dateTo') dateTo: string | undefined,
+    @Query('ishonchnomaStatus') ishonchnomaStatus: string | undefined,
+    @CurrentUser() user: JwtPayload,
+  ) {
+    const query = new QueryPurchasingInboxDto();
+    query.page = Math.max(1, Number(page) || 1);
+    query.limit = Math.min(100, Math.max(1, Number(limit) || 10));
+    query.search = search?.trim() || undefined;
+    query.dateFrom = dateFrom?.trim() || undefined;
+    query.dateTo = dateTo?.trim() || undefined;
+    query.ishonchnomaStatus =
+      ishonchnomaStatus === 'pending' || ishonchnomaStatus === 'submitted'
+        ? ishonchnomaStatus
+        : 'all';
+
+    return this.purchaseRequestsService.findIshonchnomaInboxPaginated(
+      query,
+      user.sub,
+      user.role,
     );
   }
 
@@ -668,6 +697,64 @@ export class PurchaseRequestsController {
       id,
       input,
       files ?? [],
+      user.sub,
+      user.role,
+    );
+  }
+
+  @Post(':id/purchase/contract')
+  updatePurchaseContract(
+    @Param('id', ParseMongoIdPipe) id: string,
+    @Body() dto: UpdatePurchaseContractBodyDto,
+    @CurrentUser() user: JwtPayload,
+  ) {
+    const { batchId, ...contract } = dto;
+
+    return this.purchaseRequestsService.updatePurchaseBatchContract(
+      id,
+      batchId,
+      contract,
+      user.sub,
+      user.role,
+    );
+  }
+
+  @Post(':id/purchase/ishonchnoma')
+  @UseInterceptors(
+    FilesInterceptor('files', 20, {
+      storage: memoryStorage(),
+      limits: { fileSize: 10 * 1024 * 1024 },
+    }),
+  )
+  uploadPurchaseIshonchnoma(
+    @Param('id', ParseMongoIdPipe) id: string,
+    @Req() req: Request,
+    @Body('batchId') batchId: string | undefined,
+    @Body('fileLabels') fileLabelsJson: string | undefined,
+    @UploadedFiles() files: Express.Multer.File[] | undefined,
+    @CurrentUser() user: JwtPayload,
+  ) {
+    const body = (req.body ?? {}) as Record<string, string | undefined>;
+    const resolvedBatchId = batchId ?? body.batchId;
+
+    if (!resolvedBatchId?.trim()) {
+      throw new BadRequestException('Xarid partiyasi aniqlanmadi');
+    }
+
+    let fileLabels: string[] = [];
+
+    try {
+      const rawLabels = fileLabelsJson ?? body.fileLabels;
+      fileLabels = rawLabels ? JSON.parse(rawLabels) : [];
+    } catch {
+      fileLabels = [];
+    }
+
+    return this.purchaseRequestsService.savePurchaseBatchIshonchnoma(
+      id,
+      resolvedBatchId.trim(),
+      files ?? [],
+      fileLabels,
       user.sub,
       user.role,
     );

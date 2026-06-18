@@ -23,17 +23,25 @@ export class SuperAdminSeed implements OnModuleInit {
 
     if (existing) {
       this.logger.log(`Super admin "${login}" allaqachon mavjud`);
-      return;
+    } else {
+      await this.usersService.createUser({
+        login,
+        password,
+        role: UserRole.SUPER_ADMIN,
+        displayName: 'Super Admin',
+        permissions: undefined,
+      });
+
+      this.logger.log(`Super admin "${login}" yaratildi`);
     }
 
-    await this.usersService.createUser({
-      login,
-      password,
-      role: UserRole.SUPER_ADMIN,
-      displayName: 'Super Admin',
-      permissions: undefined,
-    });
+    const updatedPermissions =
+      await this.usersService.backfillIshonchnomaPermissions();
 
-    this.logger.log(`Super admin "${login}" yaratildi`);
+    if (updatedPermissions > 0) {
+      this.logger.log(
+        `Ishonchnoma ruxsati ${updatedPermissions} ta foydalanuvchiga qo‘shildi`,
+      );
+    }
   }
 }

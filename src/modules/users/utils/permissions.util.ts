@@ -4,6 +4,8 @@ import {
 } from '../constants/permission-catalog';
 import {
   isPageActionDisabled,
+  ISHONCHNOMA_PAGE_PATH,
+  PURCHASING_QUEUE_PAGE_PATH,
   TRANSFER_RECEIPT_PAGE_PATH,
   WAREHOUSE_RECEIPT_PAGE_PATH,
   WAREHOUSES_2D_LEGACY_PAGE_PATH,
@@ -106,6 +108,40 @@ const normalizeActions = (
   return normalized;
 };
 
+const syncDerivedPermissions = (
+  permissions: UserPermissionsMap,
+): UserPermissionsMap => {
+  const purchasing = permissions[PURCHASING_QUEUE_PAGE_PATH];
+
+  if (!purchasing?.access) {
+    return permissions;
+  }
+
+  return {
+    ...permissions,
+    [ISHONCHNOMA_PAGE_PATH]: {
+      access: true,
+      actions: normalizeActions(ISHONCHNOMA_PAGE_PATH, true, {
+        create: purchasing.actions.create,
+        update: purchasing.actions.create,
+        delete: false,
+      }),
+    },
+  };
+};
+
+const resolvePermissionLookupPaths = (path: string): string[] => {
+  if (path === ISHONCHNOMA_PAGE_PATH) {
+    return [ISHONCHNOMA_PAGE_PATH, PURCHASING_QUEUE_PAGE_PATH];
+  }
+
+  if (path === WAREHOUSES_2D_PAGE_PATH || path === WAREHOUSES_2D_LEGACY_PAGE_PATH) {
+    return [WAREHOUSES_2D_PAGE_PATH, WAREHOUSES_2D_LEGACY_PAGE_PATH];
+  }
+
+  return [path];
+};
+
 export const normalizePermissions = (
   input?: UserPermissionsMap | null,
 ): UserPermissionsMap => {
@@ -134,7 +170,7 @@ export const normalizePermissions = (
     };
   }
 
-  return base;
+  return syncDerivedPermissions(base);
 };
 
 export const hasPageAccess = (
@@ -146,12 +182,11 @@ export const hasPageAccess = (
     return true;
   }
 
-  const lookupPaths =
-    path === WAREHOUSES_2D_PAGE_PATH || path === WAREHOUSES_2D_LEGACY_PAGE_PATH
-      ? [WAREHOUSES_2D_PAGE_PATH, WAREHOUSES_2D_LEGACY_PAGE_PATH]
-      : [path];
+  const lookupPaths = resolvePermissionLookupPaths(path);
 
-  return lookupPaths.some((lookupPath) => Boolean(permissions?.[lookupPath]?.access));
+  return lookupPaths.some((lookupPath) =>
+    Boolean(permissions?.[lookupPath]?.access),
+  );
 };
 
 export const hasAnyPageAccess = (
@@ -183,6 +218,10 @@ export const hasPageAction = (
     return false;
   }
 
-  const page = permissions?.[path];
-  return Boolean(page?.access && page.actions?.[action]);
+  const lookupPaths = resolvePermissionLookupPaths(path);
+
+  return lookupPaths.some((lookupPath) => {
+    const page = permissions?.[lookupPath];
+    return Boolean(page?.access && page.actions?.[action]);
+  });
 };

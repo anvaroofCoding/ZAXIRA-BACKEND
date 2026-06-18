@@ -34,6 +34,12 @@ export class WarehouseDispatchDocumentService {
     }).format(value);
   }
 
+  private formatStructureShortName(
+    structure?: { shortName?: string; fullName?: string },
+  ) {
+    return structure?.shortName?.trim() || structure?.fullName?.trim() || '—';
+  }
+
   buildFileName(dispatch: WarehouseDispatchDocument, ext: 'pdf' | 'docx') {
     return `nakladnoy-${dispatch.dispatchCode}.${ext}`;
   }
@@ -60,8 +66,13 @@ export class WarehouseDispatchDocumentService {
       doc.text(`Nakladnoy raqami: ${dispatch.dispatchCode}`);
       doc.text(`Ariza ID: ${dispatch.requestCode}`);
       doc.text(
-        `Qabul qiluvchi tuzilma: ${dispatch.targetStructure.fullName} (${dispatch.targetStructure.shortName})`,
+        `Qabul qiluvchi tuzilma: ${this.formatStructureShortName(dispatch.targetStructure)}`,
       );
+      if (dispatch.sourceStructure) {
+        doc.text(
+          `Jo‘natuvchi tuzilma: ${this.formatStructureShortName(dispatch.sourceStructure)}`,
+        );
+      }
       doc.text(`Jo‘natilgan sana: ${this.formatDate(dispatch.dispatchedAt)}`);
       doc.text(
         `Rejalashtirilgan kelish: ${this.formatDate(dispatch.plannedArrivalAt)}`,
@@ -149,8 +160,15 @@ export class WarehouseDispatchDocumentService {
             }),
             new Paragraph({ text: `Ariza ID: ${dispatch.requestCode}` }),
             new Paragraph({
-              text: `Qabul qiluvchi: ${dispatch.targetStructure.fullName} (${dispatch.targetStructure.shortName})`,
+              text: `Qabul qiluvchi: ${this.formatStructureShortName(dispatch.targetStructure)}`,
             }),
+            ...(dispatch.sourceStructure
+              ? [
+                  new Paragraph({
+                    text: `Jo‘natuvchi: ${this.formatStructureShortName(dispatch.sourceStructure)}`,
+                  }),
+                ]
+              : []),
             new Paragraph({
               text: `Jo‘natilgan sana: ${this.formatDate(dispatch.dispatchedAt)}`,
             }),

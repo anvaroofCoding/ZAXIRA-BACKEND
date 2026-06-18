@@ -47,4 +47,8 @@ export class QueryPurchasingInboxDto {
   @IsOptional()
   @IsMongoId()
   structureId?: string;
+
+  @IsOptional()
+  @IsIn(['pending', 'submitted', 'all'])
+  ishonchnomaStatus?: 'pending' | 'submitted' | 'all';
 }

@@ -68,6 +68,10 @@ export const PERMISSION_CATALOG = {
           path: '/xarid-qilish/xaridni-qabul-qilish',
           label: 'Xaridni qabul qilish',
         },
+        {
+          path: '/xarid-qilish/ishonchnoma',
+          label: 'Ishonchnoma',
+        },
       ],
     },
     {

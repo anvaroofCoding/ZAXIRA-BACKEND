@@ -987,7 +987,10 @@ export class WarehouseDispatchesService {
         return {
           itemIndex,
           name: item.name,
-          characteristics: '',
+          characteristics:
+            item.characteristics?.trim() ||
+            item.originalRequestedItem?.characteristics?.trim() ||
+            '—',
           quantityDispatched: item.quantity,
           quantityReceived: 0,
           quantityRejected: 0,
@@ -1257,7 +1260,29 @@ export class WarehouseDispatchesService {
 
     const user = await this.usersService.findById(userId);
     const userStructureId = await this.getUserStructureId(userId);
-    const result = this.toPublic(dispatch, userId, role);
+    const result: ReturnType<WarehouseDispatchesService['toPublic']> & {
+      ishonchnoma?: ReturnType<
+        PurchaseRequestsService['getPurchaseBatchIshonchnomaForWarehouse']
+      >['ishonchnoma'];
+      ishonchnomaSubmitted?: boolean;
+    } = this.toPublic(dispatch, userId, role);
+
+    if (dispatch.purchaseRequestId) {
+      const request = await this.purchaseRequestsService
+        .findByIdOrFail(String(dispatch.purchaseRequestId))
+        .catch(() => null);
+
+      if (request) {
+        const ishonchnomaMeta =
+          this.purchaseRequestsService.getPurchaseBatchIshonchnomaForWarehouse(
+            request,
+            dispatch.purchaseBatchId,
+          );
+        result.ishonchnoma = ishonchnomaMeta.ishonchnoma;
+        result.ishonchnomaSubmitted = ishonchnomaMeta.ishonchnomaSubmitted;
+      }
+    }
+
     result.canCancel = this.resolveViewerCanCancelTransfer(
       dispatch,
       userId,
