@@ -38,13 +38,13 @@ import { ApplyExcessAdjustmentsDto } from './dto/apply-excess-adjustments.dto';
 import {
   hasPageAccess,
   hasPageAction,
-  normalizePermissions,
 } from '../users/utils/permissions.util';
 import { UserPermissionsMap } from '../users/types/page-permission.type';
 import { isSuperAdminRole } from '../../common/utils/super-admin.util';
 
 const STOCKTAKE_SEQUENCE_PREFIX = 'stocktake:';
 const STOCKTAKE_PAGE_PATH = '/invertarizatsiya/invertarizatsiya-qilish';
+const STOCKTAKE_HISTORY_PATH = '/invertarizatsiya/barcha-invertarizatsiyalar';
 const STOCKTAKE_MANAGEMENT_PATH = '/invertarizatsiya/boshqaruv';
 
 const normalizeNameKey = (name: string) => name.trim().toLowerCase();
@@ -162,30 +162,60 @@ export class StocktakesService {
     };
   }
 
-  private async assertStocktakeCreatePermission(
+  private resolveUserPermissions(user: { role: UserRole; permissions?: UserPermissionsMap }) {
+    return this.usersService.resolvePermissionsForRole(
+      user.role,
+      user.permissions as UserPermissionsMap,
+    );
+  }
+
+  private async assertStocktakePageAccess(
     userId: string,
-    role?: UserRole,
+    role: UserRole | undefined,
+    pagePath: string,
   ) {
     if (isSuperAdminRole(role)) {
       return;
     }
 
-    const user = await this.usersService.findById(userId);
+    const user = await this.usersService.findByIdOrFail(userId);
     if (!user?.isActive) {
-      throw new ForbiddenException(
-        'Sizda invertarizatsiya yaratish uchun ruxsat yo‘q',
-      );
+      throw new ForbiddenException('Sahifaga ruxsat yo‘q');
     }
 
-    const permissions = normalizePermissions(
-      user.permissions as UserPermissionsMap,
-    );
+    const permissions = this.resolveUserPermissions(user);
 
-    if (!hasPageAction(permissions, STOCKTAKE_PAGE_PATH, 'create', false)) {
-      throw new ForbiddenException(
-        'Sizda invertarizatsiya yaratish uchun ruxsat yo‘q',
-      );
+    if (!hasPageAccess(permissions, pagePath, false)) {
+      throw new ForbiddenException('Sahifaga ruxsat yo‘q');
     }
+  }
+
+  private async assertStocktakeActionPermission(
+    userId: string,
+    role: UserRole | undefined,
+    action: 'create' | 'update' | 'delete',
+  ) {
+    if (isSuperAdminRole(role)) {
+      return;
+    }
+
+    const user = await this.usersService.findByIdOrFail(userId);
+    if (!user?.isActive) {
+      throw new ForbiddenException('Invertarizatsiya amali uchun ruxsat yo‘q');
+    }
+
+    const permissions = this.resolveUserPermissions(user);
+
+    if (!hasPageAction(permissions, STOCKTAKE_PAGE_PATH, action, false)) {
+      throw new ForbiddenException('Invertarizatsiya amali uchun ruxsat yo‘q');
+    }
+  }
+
+  private async assertStocktakeCreatePermission(
+    userId: string,
+    role?: UserRole,
+  ) {
+    await this.assertStocktakeActionPermission(userId, role, 'create');
   }
 
   private async assertManagementAccess(
@@ -202,9 +232,10 @@ export class StocktakesService {
       throw new ForbiddenException('Boshqaruv sahifasiga ruxsat yo‘q');
     }
 
-    const permissions = normalizePermissions(
-      user.permissions as UserPermissionsMap,
-    );
+    const permissions = this.resolveUserPermissions({
+      role: user.role,
+      permissions: user.permissions as UserPermissionsMap | undefined,
+    });
     const allowed = requireUpdate
       ? hasPageAction(permissions, STOCKTAKE_MANAGEMENT_PATH, 'update', false)
       : hasPageAccess(permissions, STOCKTAKE_MANAGEMENT_PATH, false);
@@ -425,7 +456,9 @@ export class StocktakesService {
     return this.toPublic(created);
   }
 
-  async findActive(userId: string) {
+  async findActive(userId: string, role?: UserRole) {
+    await this.assertStocktakePageAccess(userId, role, STOCKTAKE_PAGE_PATH);
+
     const stocktake = await this.stocktakeModel
       .findOne({
         createdBy: new Types.ObjectId(userId),
@@ -442,6 +475,8 @@ export class StocktakesService {
   }
 
   async findAll(query: QueryStocktakesDto, userId: string, role?: UserRole) {
+    await this.assertStocktakePageAccess(userId, role, STOCKTAKE_HISTORY_PATH);
+
     const page = query.page ?? 1;
     const limit = query.limit ?? 10;
     const skip = (page - 1) * limit;
@@ -545,6 +580,8 @@ export class StocktakesService {
   }
 
   async findById(id: string, userId: string, role?: UserRole) {
+    await this.assertStocktakePageAccess(userId, role, STOCKTAKE_HISTORY_PATH);
+
     const stocktake = await this.stocktakeModel.findById(id).exec();
 
     if (!stocktake) {
@@ -566,6 +603,7 @@ export class StocktakesService {
     userId: string,
     role?: UserRole,
   ) {
+    await this.assertStocktakeActionPermission(userId, role, 'update');
     const stocktake = await this.getEditableStocktake(id, userId, role);
     const term = search?.trim().toLowerCase();
 
@@ -591,6 +629,7 @@ export class StocktakesService {
     userId: string,
     role?: UserRole,
   ) {
+    await this.assertStocktakeActionPermission(userId, role, 'update');
     const stocktake = await this.getEditableStocktake(id, userId, role);
     const lineKey = dto.lineKey?.trim();
     const barcode = dto.barcode?.trim();
@@ -623,6 +662,7 @@ export class StocktakesService {
     userId: string,
     role?: UserRole,
   ) {
+    await this.assertStocktakeActionPermission(userId, role, 'update');
     const stocktake = await this.getEditableStocktake(id, userId, role);
     const value = dto.barcode.trim();
 
@@ -1082,6 +1122,7 @@ export class StocktakesService {
   }
 
   async complete(id: string, userId: string, role?: UserRole) {
+    await this.assertStocktakeActionPermission(userId, role, 'update');
     const stocktake = await this.getEditableStocktake(id, userId, role);
 
     if (stocktake.mode === StocktakeMode.LOCATION) {
@@ -1097,6 +1138,7 @@ export class StocktakesService {
   }
 
   async cancel(id: string, userId: string, role?: UserRole) {
+    await this.assertStocktakeActionPermission(userId, role, 'delete');
     const stocktake = await this.getEditableStocktake(id, userId, role);
     stocktake.status = StocktakeStatus.CANCELLED;
     await stocktake.save();

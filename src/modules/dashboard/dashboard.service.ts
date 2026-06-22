@@ -1,8 +1,12 @@
-import { BadRequestException, Injectable } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, PipelineStage, Types } from 'mongoose';
 import { UserRole } from '../../common/enums/user-role.enum';
+import { isSuperAdminRole } from '../../common/utils/super-admin.util';
 import { UsersService } from '../users/users.service';
+import { DASHBOARD_PAGE_PATH } from '../users/constants/disabled-page-actions';
+import { UserPermissionsMap } from '../users/types/page-permission.type';
+import { hasPageAccess, hasPageAction } from '../users/utils/permissions.util';
 import {
   WarehouseDispatch,
   WarehouseDispatchDocument,
@@ -56,7 +60,64 @@ export class DashboardService {
     return structureId;
   }
 
-  private async resolveScope(scope: Scope, userId: string) {
+  private async canUseDashboardAnalytics(
+    userId: string,
+    role?: UserRole,
+  ): Promise<boolean> {
+    if (isSuperAdminRole(role)) {
+      return true;
+    }
+
+    const user = await this.usersService.findById(userId);
+
+    if (!user) {
+      return false;
+    }
+
+    const permissions = this.usersService.resolvePermissionsForRole(
+      user.role,
+      user.permissions as UserPermissionsMap,
+    );
+
+    return hasPageAction(permissions, DASHBOARD_PAGE_PATH, 'create', false);
+  }
+
+  private async assertDashboardPageAccess(
+    userId: string,
+    role?: UserRole,
+  ) {
+    if (isSuperAdminRole(role)) {
+      return;
+    }
+
+    const user = await this.usersService.findById(userId);
+
+    if (!user) {
+      throw new ForbiddenException('Foydalanuvchi topilmadi');
+    }
+
+    const permissions = this.usersService.resolvePermissionsForRole(
+      user.role,
+      user.permissions as UserPermissionsMap,
+    );
+
+    if (!hasPageAccess(permissions, DASHBOARD_PAGE_PATH, false)) {
+      throw new ForbiddenException('Dashboard ko‘rish huquqi yo‘q');
+    }
+  }
+
+  private async resolveScope(
+    scope: Scope,
+    userId: string,
+    role?: UserRole,
+  ) {
+    const canUseAnalytics = await this.canUseDashboardAnalytics(userId, role);
+
+    if (!canUseAnalytics) {
+      const viewerStructureId = await this.resolveViewerStructureIdOrFail(userId);
+      return { mode: 'single' as const, structureId: viewerStructureId };
+    }
+
     const requested = scope.structureId?.trim();
 
     if (requested && requested.toLowerCase() === 'all') {
@@ -188,7 +249,8 @@ export class DashboardService {
   }
 
   async getSummary(scope: Scope, userId: string, role?: UserRole) {
-    const resolved = await this.resolveScope(scope, userId);
+    await this.assertDashboardPageAccess(userId, role);
+    const resolved = await this.resolveScope(scope, userId, role);
 
     if (resolved.mode === 'single') {
       return {
@@ -224,7 +286,8 @@ export class DashboardService {
     userId: string,
     role?: UserRole,
   ) {
-    const resolved = await this.resolveScope(input, userId);
+    await this.assertDashboardPageAccess(userId, role);
+    const resolved = await this.resolveScope(input, userId, role);
     const months = input.months ?? 12;
     const now = new Date();
     const from = this.subtractMonths(now, months - 1);
@@ -334,7 +397,8 @@ export class DashboardService {
     userId: string,
     role?: UserRole,
   ) {
-    const resolved = await this.resolveScope(input, userId);
+    await this.assertDashboardPageAccess(userId, role);
+    const resolved = await this.resolveScope(input, userId, role);
     const days = input.days ?? 30;
     const offsetDays = input.offsetDays ?? 0;
     const today = this.startOfUtcDay(new Date());
@@ -537,7 +601,8 @@ export class DashboardService {
     userId: string,
     role?: UserRole,
   ) {
-    const resolved = await this.resolveScope(input, userId);
+    await this.assertDashboardPageAccess(userId, role);
+    const resolved = await this.resolveScope(input, userId, role);
     const from = this.parseCalendarDate(input.from);
     const to = this.parseCalendarDate(input.to, true);
 

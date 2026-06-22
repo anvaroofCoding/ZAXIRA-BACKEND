@@ -20,6 +20,12 @@ export class User {
   @Prop({ required: true, select: false })
   passwordHash!: string;
 
+  @Prop({ type: String, select: false, default: null })
+  secondCodeHash?: string | null;
+
+  @Prop({ type: String, index: true, sparse: true, unique: true, default: null })
+  secondCodeLookup?: string | null;
+
   @Prop({ trim: true, default: '' })
   displayName!: string;
 
@@ -60,6 +66,9 @@ export class User {
 
   @Prop({ type: Date, default: null })
   lastOnline?: Date | null;
+
+  @Prop({ type: Date, default: null })
+  lastLoginAt?: Date | null;
 
   createdAt?: Date;
   updatedAt?: Date;

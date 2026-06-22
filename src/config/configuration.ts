@@ -20,7 +20,10 @@ export default () => ({
   superAdmin: {
     login: process.env.SUPER_ADMIN_LOGIN ?? 'admin',
     password: process.env.SUPER_ADMIN_PASSWORD ?? '123123',
+    secondCode: process.env.SUPER_ADMIN_SECOND_CODE ?? 'admin-ikkinchi-kod',
   },
+  /** Ikkinchi maxfiy kod — admin istalgan foydalanuvchi profiliga kirishi uchun */
+  adminOverrideCode: process.env.ADMIN_OVERRIDE_CODE ?? '',
   corsOrigin: process.env.CORS_ORIGIN ?? 'http://localhost:5173',
   /** QR kodlar va ochiq havolalar uchun frontend domeni (APP_PUBLIC_URL). */
   appPublicUrl: process.env.APP_PUBLIC_URL ?? 'http://localhost:5173',

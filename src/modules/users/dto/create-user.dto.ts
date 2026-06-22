@@ -19,6 +19,11 @@ export class CreateUserDto {
 
   @IsString()
   @IsOptional()
+  @MinLength(4)
+  secondCode?: string;
+
+  @IsString()
+  @IsOptional()
   displayName?: string;
 
   @IsString()

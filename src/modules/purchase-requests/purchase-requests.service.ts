@@ -30,13 +30,16 @@ import {
 import {
   ISHONCHNOMA_PAGE_PATH,
   PURCHASED_ITEMS_PAGE_PATH,
+  PURCHASE_HISTORY_PAGE_PATH,
   PURCHASING_QUEUE_PAGE_PATH,
   WAREHOUSE_RECEIPT_PAGE_PATH,
 } from '../users/constants/disabled-page-actions';
 import {
   PURCHASE_REQUEST_APPROVAL_PATH,
   PURCHASE_REQUEST_SUBMIT_PATH,
+  PURCHASE_STATISTICS_PAGE_PATH,
 } from './purchase-requests.constants';
+import { QueryPurchaseStatisticsDto } from './dto/query-purchase-statistics.dto';
 import { ConfirmBossDecisionDto } from './dto/confirm-boss-decision.dto';
 import { CreatePurchaseRequestDto } from './dto/create-purchase-request.dto';
 import { SavePurchaseRequestSessionDto } from './dto/save-purchase-request-session.dto';
@@ -4093,6 +4096,31 @@ export class PurchaseRequestsService implements OnModuleInit {
     return this.toPublic(request, userId);
   }
 
+  private async assertCanMutateIshonchnoma(
+    userId: string,
+    role: UserRole | undefined,
+    hasExistingFiles: boolean,
+  ) {
+    if (isSuperAdminRole(role)) {
+      return;
+    }
+
+    const user = await this.usersService.findByIdOrFail(userId);
+    const permissions = this.usersService.resolvePermissionsForRole(
+      user.role,
+      user.permissions as UserPermissionsMap,
+    );
+    const action = hasExistingFiles ? 'update' : 'create';
+
+    if (!hasPageAction(permissions, ISHONCHNOMA_PAGE_PATH, action, false)) {
+      throw new ForbiddenException(
+        hasExistingFiles
+          ? 'Ishonchnomani tahrirlash (qayta yuklash) huquqi yo‘q'
+          : 'Ishonchnoma yuklash huquqi yo‘q',
+      );
+    }
+  }
+
   async savePurchaseBatchIshonchnoma(
     id: string,
     batchId: string,
@@ -4108,6 +4136,25 @@ export class PurchaseRequestsService implements OnModuleInit {
     const request = await this.findByIdOrFail(id, userId, role, {
       purchasingView: true,
     });
+
+    let hasExistingFiles = false;
+
+    if (batchId === 'legacy') {
+      hasExistingFiles = Boolean(request.purchase?.ishonchnoma?.files?.length);
+    } else {
+      const existingBatch = (request.purchaseBatches ?? []).find(
+        (entry) => entry.batchId === batchId,
+      );
+
+      if (!existingBatch) {
+        throw new NotFoundException('Xarid partiyasi topilmadi');
+      }
+
+      hasExistingFiles = Boolean(existingBatch.ishonchnoma?.files?.length);
+    }
+
+    await this.assertCanMutateIshonchnoma(userId, role, hasExistingFiles);
+
     const uploader = await this.usersService.findByIdOrFail(userId);
     const now = new Date();
     const savedFiles = await this.purchaseRequestFilesService.saveUploadedFiles(
@@ -6055,5 +6102,433 @@ export class PurchaseRequestsService implements OnModuleInit {
     }
 
     return { id: sessionId, deleted: true };
+  }
+
+  private approvedPurchaseStatisticsStatuses(): PurchaseRequestStatus[] {
+    return [
+      PurchaseRequestStatus.PURCHASING,
+      PurchaseRequestStatus.PURCHASED,
+      PurchaseRequestStatus.WAREHOUSE_IN_TRANSIT,
+      PurchaseRequestStatus.WAREHOUSE_COMPLETED,
+    ];
+  }
+
+  private buildApprovedStatisticsMatch(
+    structureId?: string,
+  ): Record<string, unknown> {
+    const clauses: Record<string, unknown>[] = [
+      { bossDecision: ApprovalDecision.APPROVED },
+      { bossConfirmedAt: { $exists: true, $ne: null } },
+      { status: { $in: this.approvedPurchaseStatisticsStatuses() } },
+      { 'applicantStructure.structureId': { $exists: true, $ne: null } },
+    ];
+
+    if (structureId && Types.ObjectId.isValid(structureId)) {
+      const structureObjectId = new Types.ObjectId(structureId);
+      clauses.push({
+        $or: [
+          { 'applicantStructure.structureId': structureObjectId },
+          { 'applicantStructure.structureId': structureId },
+        ],
+      });
+    }
+
+    return { $and: clauses };
+  }
+
+  private roundStatisticsPercent(part: number, total: number) {
+    if (!total) return 0;
+    return Math.round((part / total) * 1000) / 10;
+  }
+
+  private mapStatisticsQuantities(input: {
+    totalQuantity: number;
+    purchasedQuantity: number;
+    unavailableQuantity: number;
+    waitingQuantity: number;
+    approvedRequestCount?: number;
+  }) {
+    const totalQuantity = input.totalQuantity ?? 0;
+    const purchasedQuantity = input.purchasedQuantity ?? 0;
+    const unavailableQuantity = input.unavailableQuantity ?? 0;
+    const waitingQuantity = input.waitingQuantity ?? 0;
+
+    return {
+      totalQuantity,
+      purchasedQuantity,
+      unavailableQuantity,
+      waitingQuantity,
+      approvedRequestCount: input.approvedRequestCount ?? 0,
+      purchasedPercent: this.roundStatisticsPercent(
+        purchasedQuantity,
+        totalQuantity,
+      ),
+      unavailablePercent: this.roundStatisticsPercent(
+        unavailableQuantity,
+        totalQuantity,
+      ),
+      waitingPercent: this.roundStatisticsPercent(
+        waitingQuantity,
+        totalQuantity,
+      ),
+    };
+  }
+
+  private async assertCanViewPurchaseStatistics(
+    userId: string,
+    role?: UserRole,
+  ) {
+    if (isSuperAdminRole(role)) {
+      return;
+    }
+
+    const user = await this.usersService.findByIdOrFail(userId);
+    const permissions = normalizePermissions(
+      user.permissions as UserPermissionsMap,
+    );
+    const allowedPaths = [
+      PURCHASE_STATISTICS_PAGE_PATH,
+      PURCHASE_REQUEST_APPROVAL_PATH,
+      PURCHASE_HISTORY_PAGE_PATH,
+      PURCHASING_QUEUE_PAGE_PATH,
+      PURCHASED_ITEMS_PAGE_PATH,
+      PURCHASE_REQUEST_SUBMIT_PATH,
+    ];
+
+    if (allowedPaths.some((path) => hasPageAccess(permissions, path, false))) {
+      return;
+    }
+
+    throw new ForbiddenException(
+      'Sotib olish statistikasini ko‘rish huquqi yo‘q',
+    );
+  }
+
+  private async resolvePurchaseStatisticsScope(
+    userId: string,
+    role?: UserRole,
+    requestedStructureId?: string,
+  ) {
+    if (isSuperAdminRole(role)) {
+      return {
+        structureId: requestedStructureId,
+        canViewAllStructures: true,
+      };
+    }
+
+    const user = await this.usersService.findByIdOrFail(userId);
+    const permissions = normalizePermissions(
+      user.permissions as UserPermissionsMap,
+    );
+    const elevatedPaths = [
+      PURCHASE_STATISTICS_PAGE_PATH,
+      PURCHASE_REQUEST_APPROVAL_PATH,
+      PURCHASE_HISTORY_PAGE_PATH,
+      PURCHASING_QUEUE_PAGE_PATH,
+      PURCHASED_ITEMS_PAGE_PATH,
+    ];
+    const canViewAllStructures = elevatedPaths.some((path) =>
+      hasPageAccess(permissions, path, false),
+    );
+
+    if (canViewAllStructures) {
+      return {
+        structureId: requestedStructureId,
+        canViewAllStructures: true,
+      };
+    }
+
+    const viewerStructureId = user.structureId
+      ? String(user.structureId)
+      : undefined;
+
+    return {
+      structureId: viewerStructureId || requestedStructureId,
+      canViewAllStructures: false,
+    };
+  }
+
+  private buildStatisticsItemQuantityFields() {
+    return {
+      totalQuantity: { $sum: '$items.quantity' },
+      purchasedQuantity: {
+        $sum: {
+          $cond: [{ $eq: ['$items.isPurchased', true] }, '$items.quantity', 0],
+        },
+      },
+      unavailableQuantity: {
+        $sum: {
+          $cond: [
+            { $eq: ['$items.isPurchaseUnavailable', true] },
+            '$items.quantity',
+            0,
+          ],
+        },
+      },
+      waitingQuantity: {
+        $sum: {
+          $cond: [
+            {
+              $and: [
+                { $ne: ['$items.isPurchased', true] },
+                { $ne: ['$items.isPurchaseUnavailable', true] },
+              ],
+            },
+            '$items.quantity',
+            0,
+          ],
+        },
+      },
+    };
+  }
+
+  async getPurchaseStatistics(
+    query: QueryPurchaseStatisticsDto,
+    userId: string,
+    role?: UserRole,
+  ) {
+    await this.assertCanViewPurchaseStatistics(userId, role);
+
+    const scope = await this.resolvePurchaseStatisticsScope(
+      userId,
+      role,
+      query.structureId,
+    );
+    const granularity = query.granularity ?? 'yearly';
+    const selectedYear = query.year ?? new Date().getUTCFullYear();
+    const structureListMatch = scope.canViewAllStructures
+      ? this.buildApprovedStatisticsMatch()
+      : this.buildApprovedStatisticsMatch(scope.structureId);
+
+    const structureRows = await this.purchaseRequestModel
+      .aggregate<{
+        _id: Types.ObjectId;
+        shortName: string;
+        fullName: string;
+        totalQuantity: number;
+        purchasedQuantity: number;
+        unavailableQuantity: number;
+        waitingQuantity: number;
+        approvedRequestCount: number;
+      }>([
+        { $match: structureListMatch },
+        { $unwind: '$items' },
+        {
+          $group: {
+            _id: '$applicantStructure.structureId',
+            shortName: { $first: '$applicantStructure.shortName' },
+            fullName: { $first: '$applicantStructure.fullName' },
+            ...this.buildStatisticsItemQuantityFields(),
+            approvedRequestIds: { $addToSet: '$_id' },
+          },
+        },
+        {
+          $addFields: {
+            approvedRequestCount: { $size: '$approvedRequestIds' },
+          },
+        },
+        { $sort: { shortName: 1 } },
+      ])
+      .exec();
+
+    const structures = structureRows.map((row) => ({
+      id: String(row._id),
+      shortName: row.shortName?.trim() || '—',
+      fullName:
+        row.fullName?.trim() || row.shortName?.trim() || 'Noma’lum tuzilma',
+      summary: this.mapStatisticsQuantities({
+        totalQuantity: row.totalQuantity,
+        purchasedQuantity: row.purchasedQuantity,
+        unavailableQuantity: row.unavailableQuantity,
+        waitingQuantity: row.waitingQuantity,
+        approvedRequestCount: row.approvedRequestCount,
+      }),
+    }));
+
+    const activeStructureId =
+      query.structureId && scope.canViewAllStructures
+        ? query.structureId
+        : scope.structureId || structures[0]?.id;
+
+    let summary = this.mapStatisticsQuantities({
+      totalQuantity: 0,
+      purchasedQuantity: 0,
+      unavailableQuantity: 0,
+      waitingQuantity: 0,
+      approvedRequestCount: 0,
+    });
+    let points: Array<{
+      label: string;
+      totalQuantity: number;
+      purchasedQuantity: number;
+      unavailableQuantity: number;
+      waitingQuantity: number;
+      purchasedPercent: number;
+      unavailablePercent: number;
+      waitingPercent: number;
+    }> = [];
+
+    if (activeStructureId) {
+      const structureMatch = this.buildApprovedStatisticsMatch(
+        activeStructureId,
+      );
+
+      const [summaryRow] = await this.purchaseRequestModel
+        .aggregate<{
+          totalQuantity: number;
+          purchasedQuantity: number;
+          unavailableQuantity: number;
+          waitingQuantity: number;
+          approvedRequestCount: number;
+        }>([
+          { $match: structureMatch },
+          { $unwind: '$items' },
+          {
+            $group: {
+              _id: null,
+              ...this.buildStatisticsItemQuantityFields(),
+              approvedRequestIds: { $addToSet: '$_id' },
+            },
+          },
+          {
+            $addFields: {
+              approvedRequestCount: { $size: '$approvedRequestIds' },
+            },
+          },
+        ])
+        .exec();
+
+      summary = this.mapStatisticsQuantities({
+        totalQuantity: summaryRow?.totalQuantity ?? 0,
+        purchasedQuantity: summaryRow?.purchasedQuantity ?? 0,
+        unavailableQuantity: summaryRow?.unavailableQuantity ?? 0,
+        waitingQuantity: summaryRow?.waitingQuantity ?? 0,
+        approvedRequestCount: summaryRow?.approvedRequestCount ?? 0,
+      });
+
+      if (granularity === 'monthly') {
+        const monthlyRows = await this.purchaseRequestModel
+          .aggregate<{
+            _id: number;
+            totalQuantity: number;
+            purchasedQuantity: number;
+            unavailableQuantity: number;
+            waitingQuantity: number;
+          }>([
+            {
+              $match: {
+                $and: [
+                  structureMatch,
+                  {
+                    $expr: {
+                      $eq: [{ $year: '$bossConfirmedAt' }, selectedYear],
+                    },
+                  },
+                ],
+              },
+            },
+            { $unwind: '$items' },
+            {
+              $group: {
+                _id: { $month: '$bossConfirmedAt' },
+                ...this.buildStatisticsItemQuantityFields(),
+              },
+            },
+            { $sort: { _id: 1 } },
+          ])
+          .exec();
+
+        const monthlyMap = new Map(
+          monthlyRows.map((row) => [row._id, row]),
+        );
+
+        const monthLabels = [
+          'Yan',
+          'Fev',
+          'Mar',
+          'Apr',
+          'May',
+          'Iyn',
+          'Iyl',
+          'Avg',
+          'Sen',
+          'Okt',
+          'Noy',
+          'Dek',
+        ];
+
+        points = monthLabels.map((label, index) => {
+          const month = index + 1;
+          const row = monthlyMap.get(month);
+          const quantities = this.mapStatisticsQuantities({
+            totalQuantity: row?.totalQuantity ?? 0,
+            purchasedQuantity: row?.purchasedQuantity ?? 0,
+            unavailableQuantity: row?.unavailableQuantity ?? 0,
+            waitingQuantity: row?.waitingQuantity ?? 0,
+          });
+
+          return {
+            label,
+            totalQuantity: quantities.totalQuantity,
+            purchasedQuantity: quantities.purchasedQuantity,
+            unavailableQuantity: quantities.unavailableQuantity,
+            waitingQuantity: quantities.waitingQuantity,
+            purchasedPercent: quantities.purchasedPercent,
+            unavailablePercent: quantities.unavailablePercent,
+            waitingPercent: quantities.waitingPercent,
+          };
+        });
+      } else {
+        const yearlyRows = await this.purchaseRequestModel
+          .aggregate<{
+            _id: number;
+            totalQuantity: number;
+            purchasedQuantity: number;
+            unavailableQuantity: number;
+            waitingQuantity: number;
+          }>([
+            { $match: structureMatch },
+            { $unwind: '$items' },
+            {
+              $group: {
+                _id: { $year: '$bossConfirmedAt' },
+                ...this.buildStatisticsItemQuantityFields(),
+              },
+            },
+            { $sort: { _id: 1 } },
+          ])
+          .exec();
+
+        points = yearlyRows.map((row) => {
+          const quantities = this.mapStatisticsQuantities({
+            totalQuantity: row.totalQuantity,
+            purchasedQuantity: row.purchasedQuantity,
+            unavailableQuantity: row.unavailableQuantity,
+            waitingQuantity: row.waitingQuantity,
+          });
+
+          return {
+            label: String(row._id),
+            totalQuantity: quantities.totalQuantity,
+            purchasedQuantity: quantities.purchasedQuantity,
+            unavailableQuantity: quantities.unavailableQuantity,
+            waitingQuantity: quantities.waitingQuantity,
+            purchasedPercent: quantities.purchasedPercent,
+            unavailablePercent: quantities.unavailablePercent,
+            waitingPercent: quantities.waitingPercent,
+          };
+        });
+      }
+    }
+
+    return {
+      granularity,
+      year: selectedYear,
+      selectedStructureId: activeStructureId ?? null,
+      canViewAllStructures: scope.canViewAllStructures,
+      structures,
+      summary,
+      points,
+    };
   }
 }

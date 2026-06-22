@@ -294,30 +294,48 @@ export class NotificationsEventsService {
     previousPermissions: UserPermissionsMap,
     nextPermissions: UserPermissionsMap,
   ) {
+    const previousNormalized = JSON.stringify(previousPermissions);
+    const nextNormalized = JSON.stringify(nextPermissions);
+
+    if (previousNormalized === nextNormalized) {
+      return;
+    }
+
     const grantedPages = this.findNewlyGrantedPages(
       previousPermissions,
       nextPermissions,
     );
 
-    if (!grantedPages.length) {
+    if (grantedPages.length) {
+      const labels = grantedPages
+        .map((page) => PAGE_LABEL_BY_PATH.get(page.path) ?? page.path)
+        .join(', ');
+
+      await this.notificationsService.createMany([
+        {
+          userId,
+          type: NotificationType.PERMISSIONS_GRANTED,
+          title: 'Yangi ruxsat berildi',
+          message:
+            grantedPages.length === 1
+              ? `Sizga «${labels}» bo‘limiga kirish huquqi berildi`
+              : `Sizga quyidagi bo‘limlarga kirish huquqi berildi: ${labels}`,
+          linkPath: grantedPages[0].path,
+          entityId: grantedPages.map((page) => page.path).join(','),
+        },
+      ]);
       return;
     }
-
-    const labels = grantedPages
-      .map((page) => PAGE_LABEL_BY_PATH.get(page.path) ?? page.path)
-      .join(', ');
 
     await this.notificationsService.createMany([
       {
         userId,
-        type: NotificationType.PERMISSIONS_GRANTED,
-        title: 'Yangi ruxsat berildi',
+        type: NotificationType.PERMISSIONS_UPDATED,
+        title: 'Ruxsatlar yangilandi',
         message:
-          grantedPages.length === 1
-            ? `Sizga «${labels}» bo‘limiga kirish huquqi berildi`
-            : `Sizga quyidagi bo‘limlarga kirish huquqi berildi: ${labels}`,
-        linkPath: grantedPages[0].path,
-        entityId: grantedPages.map((page) => page.path).join(','),
+          'Hisobingizdagi ruxsatlar administrator tomonidan yangilandi. O‘zgarishlar qo‘llanishi uchun sahifa yangilanadi.',
+        linkPath: '/dashboard',
+        entityId: 'permissions-updated',
       },
     ]);
   }
@@ -349,6 +367,32 @@ export class NotificationsEventsService {
     }
 
     return pages;
+  }
+
+  async notifyDeviceCompatibilityResult(
+    userId: string,
+    input: {
+      isCompatible: boolean;
+      overallStatus: 'pass' | 'fail' | 'partial';
+      summary: string;
+      deviceName?: string;
+    },
+  ) {
+    const deviceLabel = input.deviceName?.trim() || 'Joriy qurilma';
+    const isPass = input.isCompatible;
+
+    await this.notificationsService.createMany([
+      {
+        userId,
+        type: NotificationType.DEVICE_COMPATIBILITY,
+        title: isPass ? 'Qurilma mos keldi' : 'Qurilma mosligi tekshirildi',
+        message: isPass
+          ? `${deviceLabel}: ${input.summary}. ZAXIRA dasturini ishlatish uchun mos.`
+          : `${deviceLabel}: ${input.summary}. Minimum talablar: Intel Core i3 (yoki ekvivalent), 8 GB RAM, 256 GB disk.`,
+        linkPath: '/sozlamalar',
+        entityId: input.overallStatus,
+      },
+    ]);
   }
 
   private resolveStructureId(value: unknown): string | null {

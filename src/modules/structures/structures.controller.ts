@@ -9,7 +9,11 @@ import {
   Query,
   UseGuards,
 } from '@nestjs/common';
+import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
+import type { JwtPayload } from '../auth/interfaces/jwt-payload.interface';
+import { UsersService } from '../users/users.service';
+import { STRUCTURES_PAGE_PATH } from './constants/structures-page-path';
 import { CreateStructureDto } from './dto/create-structure.dto';
 import { QueryStructuresDto } from './dto/query-structures.dto';
 import { UpdateStructureDto } from './dto/update-structure.dto';
@@ -18,7 +22,10 @@ import { StructuresService } from './structures.service';
 @Controller('structures')
 @UseGuards(JwtAuthGuard)
 export class StructuresController {
-  constructor(private readonly structuresService: StructuresService) {}
+  constructor(
+    private readonly structuresService: StructuresService,
+    private readonly usersService: UsersService,
+  ) {}
 
   @Get()
   findAll(
@@ -43,17 +50,45 @@ export class StructuresController {
   }
 
   @Post()
-  create(@Body() dto: CreateStructureDto) {
+  async create(
+    @Body() dto: CreateStructureDto,
+    @CurrentUser() user: JwtPayload,
+  ) {
+    await this.usersService.assertPageActionPermission(
+      user.sub,
+      user.role,
+      STRUCTURES_PAGE_PATH,
+      'create',
+    );
     return this.structuresService.create(dto);
   }
 
   @Patch(':id')
-  update(@Param('id') id: string, @Body() dto: UpdateStructureDto) {
+  async update(
+    @Param('id') id: string,
+    @Body() dto: UpdateStructureDto,
+    @CurrentUser() user: JwtPayload,
+  ) {
+    await this.usersService.assertPageActionPermission(
+      user.sub,
+      user.role,
+      STRUCTURES_PAGE_PATH,
+      'update',
+    );
     return this.structuresService.update(id, dto);
   }
 
   @Delete(':id')
-  deactivate(@Param('id') id: string) {
+  async deactivate(
+    @Param('id') id: string,
+    @CurrentUser() user: JwtPayload,
+  ) {
+    await this.usersService.assertPageActionPermission(
+      user.sub,
+      user.role,
+      STRUCTURES_PAGE_PATH,
+      'delete',
+    );
     return this.structuresService.deactivate(id);
   }
 }

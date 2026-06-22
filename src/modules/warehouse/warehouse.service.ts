@@ -73,6 +73,9 @@ import {
   Structure,
   StructureDocument,
 } from '../structures/schemas/structure.schema';
+import { Stocktake, StocktakeDocument } from '../stocktakes/schemas/stocktake.schema';
+import { StocktakeMode } from '../stocktakes/enums/stocktake-mode.enum';
+import { StocktakeStatus } from '../stocktakes/enums/stocktake-status.enum';
 import { WarehousePricingService } from './warehouse-pricing.service';
 import {
   WarehouseDispatch,
@@ -135,6 +138,8 @@ export class WarehouseService {
     private readonly structureModel: Model<StructureDocument>,
     @InjectModel(WarehouseDispatch.name)
     private readonly dispatchModel: Model<WarehouseDispatchDocument>,
+    @InjectModel(Stocktake.name)
+    private readonly stocktakeModel: Model<StocktakeDocument>,
     private readonly usersService: UsersService,
     private readonly warehousePricingService: WarehousePricingService,
   ) {}
@@ -825,6 +830,27 @@ export class WarehouseService {
     }
   }
 
+  private async getStructureInventoryTotalSum(structureId: string) {
+    await this.warehousePricingService.syncInventoryUnitPrices(structureId);
+    const prices =
+      await this.warehousePricingService.getUnitPriceMapForStructure(
+        structureId,
+      );
+    const inventoryItems = await this.inventoryModel
+      .find({ structureId: new Types.ObjectId(structureId) })
+      .select('itemKey quantity unitPrice')
+      .exec();
+
+    return inventoryItems.reduce((sum, item) => {
+      const price =
+        Number(item.unitPrice) > 0
+          ? Math.round(Number(item.unitPrice))
+          : (prices.get(item.itemKey) ?? 0);
+      const qty = Number(item.quantity) || 0;
+      return sum + price * qty;
+    }, 0);
+  }
+
   async listAllWarehousesOverview(userId: string, role?: UserRole) {
     await this.assertCanViewAllWarehousesOverview(userId, role);
 
@@ -895,6 +921,7 @@ export class WarehouseService {
       {
         structure: { id: string; fullName: string; shortName: string };
         totalQuantity: number;
+        totalSum: number;
         itemTypesCount: number;
         locations: Array<{
           id: string;
@@ -923,6 +950,7 @@ export class WarehouseService {
             shortName: row.structureShortName || '—',
           },
           totalQuantity: location.totalQuantity,
+          totalSum: 0,
           itemTypesCount: location.itemTypesCount,
           locations: [location],
         });
@@ -934,9 +962,19 @@ export class WarehouseService {
       existing.locations.push(location);
     }
 
-    return Array.from(grouped.values()).sort(
+    const results = Array.from(grouped.values()).sort(
       (a, b) => b.totalQuantity - a.totalQuantity,
     );
+
+    await Promise.all(
+      results.map(async (entry) => {
+        entry.totalSum = await this.getStructureInventoryTotalSum(
+          entry.structure.id,
+        );
+      }),
+    );
+
+    return results;
   }
 
   private startOfUtcDay(date: Date) {
@@ -1592,6 +1630,49 @@ export class WarehouseService {
     return WAREHOUSE_EXPENSE_REASONS;
   }
 
+  private async resolveExpenseServiceStructure(
+    reasonKey: string,
+    serviceStructureIdInput?: string,
+  ): Promise<{
+    serviceStructureId: Types.ObjectId | null;
+    serviceStructureName: string;
+  }> {
+    const rawServiceStructureId = serviceStructureIdInput?.trim();
+    const isRequired = isFixedAssetReasonKey(reasonKey);
+
+    if (!rawServiceStructureId) {
+      if (isRequired) {
+        throw new BadRequestException('Asosiy vosita uchun tuzilma tanlang');
+      }
+
+      return { serviceStructureId: null, serviceStructureName: '' };
+    }
+
+    if (!Types.ObjectId.isValid(rawServiceStructureId)) {
+      throw new BadRequestException('Tuzilma noto‘g‘ri');
+    }
+
+    const serviceStructure = await this.structureModel
+      .findOne({
+        _id: new Types.ObjectId(rawServiceStructureId),
+        isActive: true,
+      })
+      .select('fullName shortName')
+      .exec();
+
+    if (!serviceStructure) {
+      throw new BadRequestException('Tuzilma topilmadi');
+    }
+
+    return {
+      serviceStructureId: serviceStructure._id,
+      serviceStructureName:
+        serviceStructure.shortName?.trim() ||
+        serviceStructure.fullName?.trim() ||
+        '—',
+    };
+  }
+
   async createExpense(
     dto: CreateWarehouseExpenseDto,
     userId: string,
@@ -1615,33 +1696,8 @@ export class WarehouseService {
       (r) => r.key === dto.reasonKey,
     )!;
 
-    let serviceStructureId: Types.ObjectId | null = null;
-    let serviceStructureName = '';
-
-    if (isFixedAssetReasonKey(dto.reasonKey)) {
-      const rawServiceStructureId = dto.serviceStructureId?.trim();
-      if (!rawServiceStructureId || !Types.ObjectId.isValid(rawServiceStructureId)) {
-        throw new BadRequestException('Asosiy vosita uchun xizmat tanlang');
-      }
-
-      const serviceStructure = await this.structureModel
-        .findOne({
-          _id: new Types.ObjectId(rawServiceStructureId),
-          isActive: true,
-        })
-        .select('fullName shortName')
-        .exec();
-
-      if (!serviceStructure) {
-        throw new BadRequestException('Xizmat (tuzilma) topilmadi');
-      }
-
-      serviceStructureId = serviceStructure._id;
-      serviceStructureName =
-        serviceStructure.shortName?.trim() ||
-        serviceStructure.fullName?.trim() ||
-        '—';
-    }
+    const { serviceStructureId, serviceStructureName } =
+      await this.resolveExpenseServiceStructure(dto.reasonKey, dto.serviceStructureId);
 
     const locationIdFromHeader = dto.locationId?.trim();
     const itemsInput = (dto.items ?? [])
@@ -2584,6 +2640,39 @@ export class WarehouseService {
     }, 0);
   }
 
+  private stocktakeLineMatchesInventory(
+    stocktake: StocktakeDocument,
+    line: {
+      lineKey: string;
+      barcode?: string;
+      name: string;
+    },
+    inventory: {
+      itemKey: string;
+      barcode: string;
+      name: string;
+      locationId: string;
+    },
+  ) {
+    const itemKeyMatch = line.lineKey === `item:${inventory.itemKey}`;
+    const nameKeyMatch =
+      line.lineKey === `name:${normalizeInventoryName(inventory.name)}`;
+    const barcodeMatch = Boolean(
+      line.barcode?.trim() && line.barcode === inventory.barcode,
+    );
+    const nameMatch = inventoryNamesMatch(line.name, inventory.name);
+
+    if (!itemKeyMatch && !nameKeyMatch && !barcodeMatch && !nameMatch) {
+      return false;
+    }
+
+    if (stocktake.mode === StocktakeMode.LOCATION) {
+      return String(stocktake.locationId ?? '') === String(inventory.locationId);
+    }
+
+    return nameKeyMatch || nameMatch || barcodeMatch;
+  }
+
   async getInventoryItemHistory(
     locationId: string,
     inventoryId: string,
@@ -2631,7 +2720,9 @@ export class WarehouseService {
         | 'fixed_asset'
         | 'fixed_asset_return'
         | 'fixed_asset_discard'
-        | 'import';
+        | 'import'
+        | 'stocktake_increase'
+        | 'stocktake_decrease';
       title: string;
       description: string;
       quantity?: number;
@@ -2641,8 +2732,16 @@ export class WarehouseService {
     };
 
     const events: HistoryEvent[] = [];
+    const nameLineKey = `name:${normalizeInventoryName(inventory.name)}`;
+    const stocktakeLineMatchers: Record<string, unknown>[] = [
+      { lineKey: `item:${itemKey}` },
+      { lineKey: nameLineKey },
+    ];
+    if (barcode) {
+      stocktakeLineMatchers.push({ barcode });
+    }
 
-    const [inboundDispatches, outboundDispatches, expenses, fixedAssets, imports] =
+    const [inboundDispatches, outboundDispatches, expenses, fixedAssets, imports, stocktakes] =
       await Promise.all([
         this.dispatchModel
           .find({
@@ -2702,6 +2801,19 @@ export class WarehouseService {
           })
           .select('code items comment createdAt')
           .sort({ createdAt: 1 })
+          .exec(),
+        this.stocktakeModel
+          .find({
+            structureId: structureObjectId,
+            status: StocktakeStatus.COMPLETED,
+            lines: {
+              $elemMatch: {
+                $or: stocktakeLineMatchers,
+              },
+            },
+          })
+          .select('code mode locationId locationName lines updatedAt createdAt comment')
+          .sort({ updatedAt: 1 })
           .exec(),
       ]);
 
@@ -2908,6 +3020,90 @@ export class WarehouseService {
           linkPath: `/omborlar/asosiy-vositalar?search=${encodeURIComponent(asset.expenseCode)}`,
           linkLabel: 'Asosiy vositalarni ko‘rish',
         });
+      }
+    }
+
+    for (const stocktake of stocktakes) {
+      const modeLabel =
+        stocktake.mode === StocktakeMode.LOCATION && stocktake.locationName?.trim()
+          ? ` · Joy: ${stocktake.locationName.trim()}`
+          : stocktake.mode === StocktakeMode.GENERAL
+            ? ' · Umumiy invertarizatsiya'
+            : '';
+      const commentSuffix = stocktake.comment?.trim()
+        ? ` · ${stocktake.comment.trim()}`
+        : '';
+      const occurredAt =
+        stocktake.updatedAt ?? stocktake.createdAt ?? new Date();
+
+      for (const [lineIndex, line] of (stocktake.lines ?? []).entries()) {
+        if (
+          !this.stocktakeLineMatchesInventory(stocktake, line, {
+            itemKey,
+            barcode,
+            name: inventory.name,
+            locationId,
+          })
+        ) {
+          continue;
+        }
+
+        const bookQuantity = line.bookQuantity ?? 0;
+        const countedQuantity = line.countedQuantity ?? 0;
+        const completeDiff = countedQuantity - bookQuantity;
+        const lineId = `${stocktake.id}-${line.lineKey || lineIndex}`;
+
+        if (completeDiff > 0) {
+          events.push({
+            id: `stocktake-complete-inc-${lineId}`,
+            type: 'stocktake_increase',
+            title: 'Invertarizatsiya — omborda ko‘paydi',
+            description: `${stocktake.code} · Kitobda ${bookQuantity} ta, sanaldi ${countedQuantity} ta (+${completeDiff})${modeLabel}${commentSuffix}`,
+            quantity: completeDiff,
+            occurredAt,
+            linkPath: '/invertarizatsiya/barcha-invertarizatsiyalar',
+            linkLabel: 'Invertarizatsiyani ko‘rish',
+          });
+        } else if (completeDiff < 0) {
+          events.push({
+            id: `stocktake-complete-dec-${lineId}`,
+            type: 'stocktake_decrease',
+            title: 'Invertarizatsiya — omborda kamaydi',
+            description: `${stocktake.code} · Kitobda ${bookQuantity} ta, sanaldi ${countedQuantity} ta (${completeDiff})${modeLabel}${commentSuffix}`,
+            quantity: -completeDiff,
+            occurredAt,
+            linkPath: '/invertarizatsiya/barcha-invertarizatsiyalar',
+            linkLabel: 'Invertarizatsiyani ko‘rish',
+          });
+        }
+
+        const excessDeduct = line.excessDeductQuantity ?? 0;
+        if (excessDeduct > 0) {
+          events.push({
+            id: `stocktake-excess-${lineId}`,
+            type: 'stocktake_decrease',
+            title: 'Invertarizatsiya boshqaruvi — ortiqcha ayirildi',
+            description: `${stocktake.code} · Ko‘p qismidan ${excessDeduct} ta ayirildi${modeLabel}${commentSuffix}`,
+            quantity: excessDeduct,
+            occurredAt,
+            linkPath: '/invertarizatsiya/boshqaruv',
+            linkLabel: 'Boshqaruvni ko‘rish',
+          });
+        }
+
+        const shortageAdd = line.shortageAddQuantity ?? 0;
+        if (shortageAdd > 0) {
+          events.push({
+            id: `stocktake-shortage-${lineId}`,
+            type: 'stocktake_increase',
+            title: 'Invertarizatsiya boshqaruvi — yetishmovchilik qo‘shildi',
+            description: `${stocktake.code} · Kam qismi uchun ${shortageAdd} ta qo‘shildi${modeLabel}${commentSuffix}`,
+            quantity: shortageAdd,
+            occurredAt,
+            linkPath: '/invertarizatsiya/boshqaruv',
+            linkLabel: 'Boshqaruvni ko‘rish',
+          });
+        }
       }
     }
 

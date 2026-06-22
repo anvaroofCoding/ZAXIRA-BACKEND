@@ -11,6 +11,8 @@ import type { Server, Socket } from 'socket.io';
 import { UserRole } from '../../common/enums/user-role.enum';
 import { JwtPayload } from '../auth/interfaces/jwt-payload.interface';
 import { UserDevicesService } from '../auth/user-devices.service';
+import { UserSessionEventsService } from '../auth/user-session-events.service';
+import { SessionEventType } from '../auth/enums/session-event-type.enum';
 import { UsersService } from '../users/users.service';
 
 @WebSocketGateway({
@@ -36,6 +38,8 @@ export class RealtimeGateway
     private readonly usersService: UsersService,
     @Inject(forwardRef(() => UserDevicesService))
     private readonly userDevicesService: UserDevicesService,
+    @Inject(forwardRef(() => UserSessionEventsService))
+    private readonly userSessionEventsService: UserSessionEventsService,
   ) {}
 
   isUserOnline(userId: string): boolean {
@@ -85,6 +89,17 @@ export class RealtimeGateway
     return typeof userAgent === 'string' ? userAgent.trim() : '';
   }
 
+  private readSocketIp(client: Socket): string {
+    const forwarded = client.handshake.headers['x-forwarded-for'];
+
+    if (typeof forwarded === 'string' && forwarded.trim()) {
+      return forwarded.split(',')[0]?.trim() || '';
+    }
+
+    const address = client.handshake.address;
+    return typeof address === 'string' ? address.trim() : '';
+  }
+
   async handleConnection(client: Socket) {
     try {
       const token = this.extractToken(client);
@@ -106,13 +121,20 @@ export class RealtimeGateway
       }
 
       const userId = user.id;
-      const prev = this.connectionCounts.get(userId) ?? 0;
-      this.connectionCounts.set(userId, prev + 1);
-
       const deviceId = this.readDeviceId(client);
+      const deviceName = this.readDeviceName(client);
+      const userAgent = this.readUserAgent(client);
+      const ipAddress = this.readSocketIp(client);
+
       client.data.userId = userId;
       client.data.role = user.role;
       client.data.deviceId = deviceId;
+      client.data.deviceName = deviceName;
+      client.data.userAgent = userAgent;
+      client.data.ipAddress = ipAddress;
+
+      const prev = this.connectionCounts.get(userId) ?? 0;
+      this.connectionCounts.set(userId, prev + 1);
 
       if (deviceId) {
         const deviceKey = this.buildDeviceKey(userId, deviceId);
@@ -122,14 +144,27 @@ export class RealtimeGateway
         try {
           await this.userDevicesService.registerDevice(userId, {
             deviceId,
-            deviceName: this.readDeviceName(client),
-            userAgent: this.readUserAgent(client),
+            deviceName,
+            userAgent,
           });
         } catch (error) {
           this.logger.warn(
             `Qurilma ro‘yxatdan o‘tkazilmadi (${userId}): ${String(error)}`,
           );
         }
+      }
+
+      try {
+        await this.userSessionEventsService.recordDailyOnlineEvent(userId, {
+          deviceId,
+          deviceName,
+          userAgent,
+          ipAddress,
+        });
+      } catch (error) {
+        this.logger.warn(
+          `Kunlik onlayn yozilmadi (${userId}): ${String(error)}`,
+        );
       }
     } catch {
       this.logger.warn(`WebSocket rad etildi: ${client.id}`);
@@ -140,6 +175,9 @@ export class RealtimeGateway
   async handleDisconnect(client: Socket) {
     const userId = client.data.userId as string | undefined;
     const deviceId = client.data.deviceId as string | undefined;
+    const deviceName = client.data.deviceName as string | undefined;
+    const userAgent = client.data.userAgent as string | undefined;
+    const ipAddress = client.data.ipAddress as string | undefined;
 
     if (userId) {
       const prev = this.connectionCounts.get(userId) ?? 1;
@@ -149,6 +187,16 @@ export class RealtimeGateway
         this.connectionCounts.delete(userId);
         try {
           await this.usersService.updateLastOnline(userId);
+          await this.userSessionEventsService.recordEvent(
+            userId,
+            SessionEventType.OFFLINE,
+            {
+              deviceId: deviceId || '',
+              deviceName: deviceName || '',
+              userAgent: userAgent || '',
+              ipAddress: ipAddress || '',
+            },
+          );
         } catch (error) {
           this.logger.warn(
             `lastOnline yangilab bo‘lmadi (${userId}): ${String(error)}`,

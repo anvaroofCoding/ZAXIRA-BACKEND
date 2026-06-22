@@ -37,6 +37,7 @@ import { ConfirmBossDecisionDto } from './dto/confirm-boss-decision.dto';
 import { CreatePurchaseRequestDto } from './dto/create-purchase-request.dto';
 import { QueryApprovalInboxDto } from './dto/query-approval-inbox.dto';
 import { QueryPurchaseRequestHistoryDto } from './dto/query-purchase-request-history.dto';
+import { QueryPurchaseStatisticsDto } from './dto/query-purchase-statistics.dto';
 import { QueryPurchaseRequestsDto } from './dto/query-purchase-requests.dto';
 import { QueryPurchasingInboxDto } from './dto/query-purchasing-inbox.dto';
 import { PolishPurchaseItemTextDto } from './dto/polish-purchase-item-text.dto';
@@ -620,6 +621,26 @@ export class PurchaseRequestsController {
       type: file.mimeType,
       disposition: `attachment; filename="${encodeURIComponent(file.originalName)}"`,
     });
+  }
+
+  @Get('analytics/purchase-statistics')
+  getPurchaseStatistics(
+    @Query('structureId') structureId: string | undefined,
+    @Query('granularity') granularity: string | undefined,
+    @Query('year') year: string | undefined,
+    @CurrentUser() user: JwtPayload,
+  ) {
+    const query = new QueryPurchaseStatisticsDto();
+    query.structureId = structureId?.trim() || undefined;
+    query.granularity =
+      granularity === 'monthly' ? 'monthly' : 'yearly';
+    query.year = year ? Number(year) : undefined;
+
+    return this.purchaseRequestsService.getPurchaseStatistics(
+      query,
+      user.sub,
+      user.role,
+    );
   }
 
   @Get(':id')

@@ -10,11 +10,21 @@ import { UsersModule } from '../users/users.module';
 import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
 import {
+  AppSetting,
+  AppSettingSchema,
+} from './schemas/app-setting.schema';
+import {
   UserDeviceSession,
   UserDeviceSessionSchema,
 } from './schemas/user-device-session.schema';
+import {
+  UserSessionEvent,
+  UserSessionEventSchema,
+} from './schemas/user-session-event.schema';
 import { JwtStrategy } from './strategies/jwt.strategy';
 import { UserDevicesService } from './user-devices.service';
+import { UserSessionEventsService } from './user-session-events.service';
+import { GlobalSecondCodeService } from './global-second-code.service';
 
 @Module({
   imports: [
@@ -22,7 +32,9 @@ import { UserDevicesService } from './user-devices.service';
     forwardRef(() => RealtimeModule),
     forwardRef(() => NotificationsModule),
     MongooseModule.forFeature([
+      { name: AppSetting.name, schema: AppSettingSchema },
       { name: UserDeviceSession.name, schema: UserDeviceSessionSchema },
+      { name: UserSessionEvent.name, schema: UserSessionEventSchema },
     ]),
     PassportModule.register({ defaultStrategy: 'jwt' }),
     JwtModule.registerAsync({
@@ -40,7 +52,13 @@ import { UserDevicesService } from './user-devices.service';
     }),
   ],
   controllers: [AuthController],
-  providers: [AuthService, UserDevicesService, JwtStrategy],
-  exports: [AuthService, UserDevicesService, JwtModule],
+  providers: [
+    AuthService,
+    UserDevicesService,
+    UserSessionEventsService,
+    GlobalSecondCodeService,
+    JwtStrategy,
+  ],
+  exports: [AuthService, UserDevicesService, UserSessionEventsService, JwtModule],
 })
 export class AuthModule {}

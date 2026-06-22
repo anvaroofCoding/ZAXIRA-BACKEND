@@ -9,9 +9,13 @@ import {
   Query,
   UseGuards,
 } from '@nestjs/common';
+import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { ParseMongoIdPipe } from '../../common/pipes/parse-mongo-id.pipe';
+import type { JwtPayload } from '../auth/interfaces/jwt-payload.interface';
+import { UsersService } from '../users/users.service';
 import { CommissionsService } from './commissions.service';
+import { COMMISSIONS_PAGE_PATH } from './constants/commissions-page-path';
 import { CreateCommissionDto } from './dto/create-commission.dto';
 import { QueryCommissionsDto } from './dto/query-commissions.dto';
 import { UpdateCommissionDto } from './dto/update-commission.dto';
@@ -19,7 +23,10 @@ import { UpdateCommissionDto } from './dto/update-commission.dto';
 @Controller('commissions')
 @UseGuards(JwtAuthGuard)
 export class CommissionsController {
-  constructor(private readonly commissionsService: CommissionsService) {}
+  constructor(
+    private readonly commissionsService: CommissionsService,
+    private readonly usersService: UsersService,
+  ) {}
 
   @Get()
   findAll(
@@ -41,20 +48,45 @@ export class CommissionsController {
   }
 
   @Post()
-  create(@Body() dto: CreateCommissionDto) {
+  async create(
+    @Body() dto: CreateCommissionDto,
+    @CurrentUser() user: JwtPayload,
+  ) {
+    await this.usersService.assertPageActionPermission(
+      user.sub,
+      user.role,
+      COMMISSIONS_PAGE_PATH,
+      'create',
+    );
     return this.commissionsService.create(dto);
   }
 
   @Patch(':id')
-  update(
+  async update(
     @Param('id', ParseMongoIdPipe) id: string,
     @Body() dto: UpdateCommissionDto,
+    @CurrentUser() user: JwtPayload,
   ) {
+    await this.usersService.assertPageActionPermission(
+      user.sub,
+      user.role,
+      COMMISSIONS_PAGE_PATH,
+      'update',
+    );
     return this.commissionsService.update(id, dto);
   }
 
   @Delete(':id')
-  deactivate(@Param('id', ParseMongoIdPipe) id: string) {
+  async deactivate(
+    @Param('id', ParseMongoIdPipe) id: string,
+    @CurrentUser() user: JwtPayload,
+  ) {
+    await this.usersService.assertPageActionPermission(
+      user.sub,
+      user.role,
+      COMMISSIONS_PAGE_PATH,
+      'delete',
+    );
     return this.commissionsService.deactivate(id);
   }
 }

@@ -6,8 +6,10 @@ import {
   NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { InjectModel } from '@nestjs/mongoose';
 import * as bcrypt from 'bcrypt';
+import { createHmac } from 'node:crypto';
 import { Model, Types } from 'mongoose';
 import { UserRole } from '../../common/enums/user-role.enum';
 import { isSuperAdminRole } from '../../common/utils/super-admin.util';
@@ -36,6 +38,7 @@ type UsersActionKey = 'create' | 'update' | 'delete';
 export interface CreateUserInput {
   login: string;
   password: string;
+  secondCode?: string;
   role?: UserRole;
   displayName?: string;
   position?: string;
@@ -46,10 +49,12 @@ export interface CreateUserInput {
 
 @Injectable()
 export class UsersService {
-  private async assertUsersActionPermission(
+  async assertPageActionPermission(
     requesterId: string | undefined,
     requesterRole: UserRole | undefined,
+    pagePath: string,
     action: UsersActionKey,
+    message = 'Sahifa amali uchun ruxsat yo‘q',
   ) {
     if (!requesterId || isSuperAdminRole(requesterRole)) {
       return;
@@ -57,7 +62,7 @@ export class UsersService {
 
     const requester = await this.findById(requesterId);
     if (!requester?.isActive) {
-      throw new ForbiddenException('Sahifa amali uchun ruxsat yo‘q');
+      throw new ForbiddenException(message);
     }
 
     const permissions = this.resolvePermissionsForRole(
@@ -65,15 +70,176 @@ export class UsersService {
       requester.permissions as UserPermissionsMap | undefined,
     );
 
-    if (!hasPageAction(permissions, USERS_PAGE_PATH, action, false)) {
-      throw new ForbiddenException('Sahifa amali uchun ruxsat yo‘q');
+    if (!hasPageAction(permissions, pagePath, action, false)) {
+      throw new ForbiddenException(message);
     }
+  }
+
+  private async assertUsersActionPermission(
+    requesterId: string | undefined,
+    requesterRole: UserRole | undefined,
+    action: UsersActionKey,
+  ) {
+    return this.assertPageActionPermission(
+      requesterId,
+      requesterRole,
+      USERS_PAGE_PATH,
+      action,
+    );
+  }
+
+  canViewUserActivity(viewerRole?: UserRole): boolean {
+    return isSuperAdminRole(viewerRole);
+  }
+
+  async assertCanViewUserActivity(
+    viewerId: string | undefined,
+    viewerRole: UserRole | undefined,
+  ) {
+    if (this.canViewUserActivity(viewerRole)) {
+      return;
+    }
+
+    throw new ForbiddenException(
+      'Foydalanuvchi faolligini ko‘rish huquqi yo‘q',
+    );
+  }
+
+  private assertSuperAdminOnly(
+    requesterRole: UserRole | undefined,
+    message = 'Faqat super admin uchun ruxsat berilgan',
+  ) {
+    if (!isSuperAdminRole(requesterRole)) {
+      throw new ForbiddenException(message);
+    }
+  }
+
+  async findByIdOrFailForActivity(id: string) {
+    const user = await this.userModel.findById(id).exec();
+
+    if (!user) {
+      throw new NotFoundException('Foydalanuvchi topilmadi');
+    }
+
+    return user;
   }
 
   constructor(
     @InjectModel(User.name) private readonly userModel: Model<UserDocument>,
     private readonly structuresService: StructuresService,
+    private readonly configService: ConfigService,
   ) {}
+
+  private buildDefaultSecondCode(login: string): string {
+    const normalized = login.trim().toLowerCase();
+    return `${normalized}-ikkinchi-kod`;
+  }
+
+  private buildSecondCodeLookup(plainCode: string): string {
+    const normalized = plainCode.trim();
+    const secret = this.configService.getOrThrow<string>('jwt.secret');
+
+    return createHmac('sha256', secret).update(normalized).digest('hex');
+  }
+
+  private async resolveSecondCodeCredentials(plainCode: string) {
+    const normalized = plainCode.trim();
+
+    if (normalized.length < 4) {
+      throw new BadRequestException(
+        'Ikkinchi kod kamida 4 belgidan iborat bo‘lishi kerak',
+      );
+    }
+
+    const lookup = this.buildSecondCodeLookup(normalized);
+    const existing = await this.userModel
+      .findOne({ secondCodeLookup: lookup })
+      .select('_id')
+      .exec();
+
+    return {
+      normalized,
+      lookup,
+      hash: await bcrypt.hash(normalized, BCRYPT_ROUNDS),
+      existingUserId: existing ? String(existing._id) : null,
+    };
+  }
+
+  async findBySecondCode(plainCode: string): Promise<UserDocument | null> {
+    const normalized = plainCode.trim();
+    if (!normalized) {
+      return null;
+    }
+
+    const lookup = this.buildSecondCodeLookup(normalized);
+    const user = await this.userModel
+      .findOne({ secondCodeLookup: lookup, isActive: true })
+      .select('+secondCodeHash')
+      .exec();
+
+    if (!user?.secondCodeHash) {
+      return null;
+    }
+
+    const isValid = await bcrypt.compare(normalized, user.secondCodeHash);
+    return isValid ? user : null;
+  }
+
+  private async applySecondCode(
+    user: UserDocument,
+    plainCode: string,
+    excludeUserId?: string,
+  ) {
+    const credentials = await this.resolveSecondCodeCredentials(plainCode);
+
+    if (
+      credentials.existingUserId &&
+      credentials.existingUserId !== excludeUserId
+    ) {
+      throw new ConflictException('Bu ikkinchi kod boshqa foydalanuvchida mavjud');
+    }
+
+    user.secondCodeHash = credentials.hash;
+    user.secondCodeLookup = credentials.lookup;
+  }
+
+  async ensureSecondCode(userId: string, plainCode: string): Promise<boolean> {
+    const user = await this.userModel.findById(userId).exec();
+
+    if (!user || user.secondCodeLookup) {
+      return false;
+    }
+
+    await this.applySecondCode(user, plainCode, userId);
+    await user.save();
+    return true;
+  }
+
+  async backfillMissingSecondCodes(): Promise<number> {
+    const users = await this.userModel
+      .find({
+        $or: [
+          { secondCodeLookup: { $exists: false } },
+          { secondCodeLookup: null },
+          { secondCodeLookup: '' },
+        ],
+      })
+      .exec();
+
+    let updated = 0;
+
+    for (const user of users) {
+      await this.applySecondCode(
+        user,
+        this.buildDefaultSecondCode(user.login),
+        String(user._id),
+      );
+      await user.save();
+      updated += 1;
+    }
+
+    return updated;
+  }
 
   private parseStructureFromUser(user: UserDocument) {
     const structureRef = user.structureId as
@@ -151,7 +317,14 @@ export class UsersService {
       createdAt: user.createdAt,
       updatedAt: user.updatedAt,
       lastOnline: user.lastOnline ?? null,
+      lastLoginAt: user.lastLoginAt ?? null,
     };
+  }
+
+  async updateLastLogin(userId: string, at: Date = new Date()): Promise<void> {
+    await this.userModel
+      .updateOne({ _id: userId }, { $set: { lastLoginAt: at } })
+      .exec();
   }
 
   async updateLastOnline(userId: string, at: Date = new Date()): Promise<void> {
@@ -372,7 +545,9 @@ export class UsersService {
       return createFullPermissions();
     }
 
-    return normalizePermissions(permissions ?? createEmptyPermissions());
+    return normalizePermissions(permissions ?? createEmptyPermissions(), {
+      applyLegacy: false,
+    });
   }
 
   private async resolveStructureId(structureId: string) {
@@ -443,9 +618,20 @@ export class UsersService {
       ? new Types.ObjectId(input.createdById)
       : undefined;
 
+    const secondCodePlain =
+      input.secondCode?.trim() || this.buildDefaultSecondCode(input.login);
+    const secondCodeCredentials =
+      await this.resolveSecondCodeCredentials(secondCodePlain);
+
+    if (secondCodeCredentials.existingUserId) {
+      throw new ConflictException('Bu ikkinchi kod boshqa foydalanuvchida mavjud');
+    }
+
     return this.userModel.create({
       login: input.login.toLowerCase(),
       passwordHash,
+      secondCodeHash: secondCodeCredentials.hash,
+      secondCodeLookup: secondCodeCredentials.lookup,
       role,
       displayName: input.displayName ?? input.login,
       position: input.position?.trim() ?? '',
@@ -467,14 +653,19 @@ export class UsersService {
       'create',
     );
 
+    if (dto.secondCode) {
+      this.assertSuperAdminOnly(requesterRole);
+    }
+
     const user = await this.createUser({
       login: dto.login,
       password: dto.password,
+      ...(dto.secondCode ? { secondCode: dto.secondCode } : {}),
       displayName: dto.displayName,
       position: dto.position,
       structureId: dto.structureId,
       createdById,
-      permissions: normalizePermissions(dto.permissions),
+      permissions: normalizePermissions(dto.permissions, { applyLegacy: false }),
     });
 
     const populated = await this.userModel
@@ -516,7 +707,9 @@ export class UsersService {
       if (
         isSuperAdminRole(user.role) ||
         hasPageAccess(
-          normalizePermissions(user.permissions as UserPermissionsMap),
+          normalizePermissions(user.permissions as UserPermissionsMap, {
+            applyLegacy: false,
+          }),
           pagePath,
           false,
         )
@@ -539,6 +732,10 @@ export class UsersService {
       requesterRole,
       'update',
     );
+
+    if (dto.secondCode) {
+      this.assertSuperAdminOnly(requesterRole);
+    }
 
     const user = await this.findById(id);
 
@@ -570,6 +767,10 @@ export class UsersService {
       user.passwordHash = await bcrypt.hash(dto.password, BCRYPT_ROUNDS);
     }
 
+    if (dto.secondCode) {
+      await this.applySecondCode(user, dto.secondCode, user.id);
+    }
+
     if (dto.structureId !== undefined && user.role !== UserRole.SUPER_ADMIN) {
       user.structureId = await this.resolveStructureId(dto.structureId);
     }
@@ -578,7 +779,8 @@ export class UsersService {
       user.permissions =
         user.role === UserRole.SUPER_ADMIN
           ? createFullPermissions()
-          : normalizePermissions(dto.permissions);
+          : normalizePermissions(dto.permissions, { applyLegacy: false });
+      user.markModified('permissions');
     }
 
     if (user.role !== UserRole.SUPER_ADMIN) {

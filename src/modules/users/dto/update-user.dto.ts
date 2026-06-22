@@ -20,6 +20,11 @@ export class UpdateUserDto {
   @MinLength(6)
   password?: string;
 
+  @IsString()
+  @IsOptional()
+  @MinLength(4)
+  secondCode?: string;
+
   @IsBoolean()
   @IsOptional()
   isActive?: boolean;

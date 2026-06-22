@@ -34,7 +34,7 @@ export class StocktakesController {
 
   @Get('active')
   findActive(@CurrentUser() user: JwtPayload) {
-    return this.stocktakesService.findActive(user.sub);
+    return this.stocktakesService.findActive(user.sub, user.role);
   }
 
   @Get()

@@ -503,6 +503,19 @@ export class WarehouseDispatchesService {
     );
   }
 
+  private buildTransferSourceClause() {
+    return {
+      $or: [{ purchaseRequestId: null }, { requestCode: /^TR-/i }],
+    };
+  }
+
+  private buildPurchaseSourceClause() {
+    return {
+      purchaseRequestId: { $exists: true, $ne: null },
+      requestCode: { $not: /^TR-/i },
+    };
+  }
+
   private resolveDispatchSourceStructureId(
     dispatch: WarehouseDispatchDocument,
   ) {
@@ -1330,9 +1343,9 @@ export class WarehouseDispatchesService {
     });
 
     if (query.source === 'transfer') {
-      clauses.push({
-        $or: [{ purchaseRequestId: null }, { requestCode: /^TR-/i }],
-      });
+      clauses.push(this.buildTransferSourceClause());
+    } else {
+      clauses.push(this.buildPurchaseSourceClause());
     }
 
     if (!isSuperAdminRole(role)) {
@@ -1436,6 +1449,7 @@ export class WarehouseDispatchesService {
 
   async countPendingReceipt(userId: string, role?: UserRole) {
     const filter: Record<string, unknown> = {
+      ...this.buildPurchaseSourceClause(),
       status: {
         $in: [
           WarehouseDispatchStatus.PENDING_RECEIPT,

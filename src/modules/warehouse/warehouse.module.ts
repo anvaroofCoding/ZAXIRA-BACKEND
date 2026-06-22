@@ -41,6 +41,10 @@ import {
   Structure,
   StructureSchema,
 } from '../structures/schemas/structure.schema';
+import {
+  Stocktake,
+  StocktakeSchema,
+} from '../stocktakes/schemas/stocktake.schema';
 
 @Module({
   imports: [
@@ -57,6 +61,7 @@ import {
       { name: WarehouseDispatch.name, schema: WarehouseDispatchSchema },
       { name: Sequence.name, schema: SequenceSchema },
       { name: Structure.name, schema: StructureSchema },
+      { name: Stocktake.name, schema: StocktakeSchema },
     ]),
     UsersModule,
   ],

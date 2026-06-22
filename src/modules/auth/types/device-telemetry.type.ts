@@ -1,0 +1,23 @@
+export interface DeviceTelemetry {
+  ramGb?: number | null;
+  cpuCores?: number | null;
+  processor?: string | null;
+  processorModel?: string | null;
+  processorArchitecture?: string | null;
+  processorPlatform?: string | null;
+  networkType?: string | null;
+  networkDownlinkMbps?: number | null;
+  networkRttMs?: number | null;
+  memoryUsedPercent?: number | null;
+  jsHeapUsedMb?: number | null;
+  jsHeapLimitMb?: number | null;
+  storageUsedMb?: number | null;
+  storageQuotaMb?: number | null;
+  storageUsedPercent?: number | null;
+  screenWidth?: number | null;
+  screenHeight?: number | null;
+  devicePixelRatio?: number | null;
+  language?: string | null;
+  timezone?: string | null;
+  collectedAt?: string | null;
+}

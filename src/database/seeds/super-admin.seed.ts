@@ -18,15 +18,28 @@ export class SuperAdminSeed implements OnModuleInit {
       'superAdmin.password',
       '123123',
     );
+    const secondCode = this.configService.get<string>(
+      'superAdmin.secondCode',
+      'admin-ikkinchi-kod',
+    );
 
     const existing = await this.usersService.findByLogin(login);
 
     if (existing) {
-      this.logger.log(`Super admin "${login}" allaqachon mavjud`);
+      const ensured = await this.usersService.ensureSecondCode(
+        existing.id,
+        secondCode,
+      );
+      if (ensured) {
+        this.logger.log(`Super admin "${login}" uchun ikkinchi kod qo‘yildi`);
+      } else {
+        this.logger.log(`Super admin "${login}" allaqachon mavjud`);
+      }
     } else {
       await this.usersService.createUser({
         login,
         password,
+        secondCode,
         role: UserRole.SUPER_ADMIN,
         displayName: 'Super Admin',
         permissions: undefined,
@@ -41,6 +54,15 @@ export class SuperAdminSeed implements OnModuleInit {
     if (updatedPermissions > 0) {
       this.logger.log(
         `Ishonchnoma ruxsati ${updatedPermissions} ta foydalanuvchiga qo‘shildi`,
+      );
+    }
+
+    const backfilledSecondCodes =
+      await this.usersService.backfillMissingSecondCodes();
+
+    if (backfilledSecondCodes > 0) {
+      this.logger.log(
+        `Ikkinchi kod ${backfilledSecondCodes} ta foydalanuvchiga qo‘yildi (login-ikkinchi-kod)`,
       );
     }
   }

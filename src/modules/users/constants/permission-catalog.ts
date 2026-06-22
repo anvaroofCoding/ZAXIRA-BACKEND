@@ -50,6 +50,10 @@ export const PERMISSION_CATALOG = {
           label: 'Arizalarni tasdiqlash',
         },
         { path: '/xaridlar/arizalar-tarixi', label: 'Arizalar tarixi' },
+        {
+          path: '/xaridlar/sotib-olish-statistikasi',
+          label: 'Sotib olish statistikasi',
+        },
       ],
     },
     {

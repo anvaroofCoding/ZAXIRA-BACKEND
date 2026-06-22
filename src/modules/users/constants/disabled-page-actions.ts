@@ -2,6 +2,7 @@ import type { PermissionActionKey } from './permission-catalog';
 
 /** Vaqtinchalik (ticket) — ruxsatlar UI va API da majburiy o‘chiriladi */
 export const PURCHASE_APPROVAL_PAGE_PATH = '/xaridlar/arizalarni-tasdiqlash';
+export const DASHBOARD_PAGE_PATH = '/dashboard';
 export const PURCHASE_HISTORY_PAGE_PATH = '/xaridlar/arizalar-tarixi';
 export const PURCHASED_ITEMS_PAGE_PATH =
   '/xarid-qilish/xarid-qilingan-tavarlar';
@@ -20,6 +21,7 @@ export const TRANSFER_RECEIPT_PAGE_PATH = '/transfer/transferni-qabul-qilish';
 export const TRANSFER_HISTORY_PAGE_PATH = '/transfer/transferlar-tarixi';
 
 export const DISABLED_PAGE_ACTIONS: Record<string, PermissionActionKey[]> = {
+  [DASHBOARD_PAGE_PATH]: ['update', 'delete'],
   [PURCHASE_APPROVAL_PAGE_PATH]: ['update', 'delete'],
   [PURCHASE_HISTORY_PAGE_PATH]: ['create', 'update', 'delete'],
   [PURCHASED_ITEMS_PAGE_PATH]: ['create', 'update', 'delete'],

@@ -11,6 +11,7 @@ import {
   WAREHOUSES_2D_LEGACY_PAGE_PATH,
   WAREHOUSES_2D_PAGE_PATH,
 } from '../constants/disabled-page-actions';
+import { isGranularPermissionPath } from '../constants/granular-permission-paths';
 
 const RECEIPT_PAGE_PATHS = new Set([
   WAREHOUSE_RECEIPT_PAGE_PATH,
@@ -70,6 +71,10 @@ const isLegacyStrippedActions = (
   path: string,
   actions?: Partial<PagePermissionActions>,
 ) => {
+  if (isGranularPermissionPath(path)) {
+    return false;
+  }
+
   const enabledActionKeys = getEnabledActionKeys(path);
 
   if (!enabledActionKeys.length) {
@@ -83,20 +88,30 @@ const normalizeActions = (
   path: string,
   access: boolean,
   actions?: Partial<PagePermissionActions>,
+  applyLegacy = true,
 ): PagePermissionActions => {
   if (!access) {
     return createDefaultActions(false);
   }
 
-  if (isLegacyStrippedActions(path, actions)) {
+  if (applyLegacy && isLegacyStrippedActions(path, actions)) {
     return sanitizePageActions(path, createDefaultActions(true));
   }
 
-  const normalized = sanitizePageActions(path, {
-    create: actions?.create ?? true,
-    update: actions?.update ?? true,
-    delete: actions?.delete ?? true,
-  });
+  const normalized = sanitizePageActions(
+    path,
+    isGranularPermissionPath(path)
+      ? {
+          create: Boolean(actions?.create),
+          update: Boolean(actions?.update),
+          delete: Boolean(actions?.delete),
+        }
+      : {
+          create: actions?.create ?? true,
+          update: actions?.update ?? true,
+          delete: actions?.delete ?? true,
+        },
+  );
 
   if (RECEIPT_PAGE_PATHS.has(path)) {
     return sanitizePageActions(path, {
@@ -110,29 +125,11 @@ const normalizeActions = (
 
 const syncDerivedPermissions = (
   permissions: UserPermissionsMap,
-): UserPermissionsMap => {
-  const purchasing = permissions[PURCHASING_QUEUE_PAGE_PATH];
-
-  if (!purchasing?.access) {
-    return permissions;
-  }
-
-  return {
-    ...permissions,
-    [ISHONCHNOMA_PAGE_PATH]: {
-      access: true,
-      actions: normalizeActions(ISHONCHNOMA_PAGE_PATH, true, {
-        create: purchasing.actions.create,
-        update: purchasing.actions.create,
-        delete: false,
-      }),
-    },
-  };
-};
+): UserPermissionsMap => permissions;
 
 const resolvePermissionLookupPaths = (path: string): string[] => {
   if (path === ISHONCHNOMA_PAGE_PATH) {
-    return [ISHONCHNOMA_PAGE_PATH, PURCHASING_QUEUE_PAGE_PATH];
+    return [ISHONCHNOMA_PAGE_PATH];
   }
 
   if (path === WAREHOUSES_2D_PAGE_PATH || path === WAREHOUSES_2D_LEGACY_PAGE_PATH) {
@@ -144,7 +141,9 @@ const resolvePermissionLookupPaths = (path: string): string[] => {
 
 export const normalizePermissions = (
   input?: UserPermissionsMap | null,
+  options: { applyLegacy?: boolean } = {},
 ): UserPermissionsMap => {
+  const { applyLegacy = false } = options;
   const base = createEmptyPermissions();
 
   if (!input) {
@@ -166,7 +165,7 @@ export const normalizePermissions = (
 
     base[path] = {
       access,
-      actions: normalizeActions(path, access, current?.actions),
+      actions: normalizeActions(path, access, current?.actions, applyLegacy),
     };
   }
 

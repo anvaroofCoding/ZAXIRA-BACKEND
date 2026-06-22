@@ -1,5 +1,6 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
-import { HydratedDocument, Types } from 'mongoose';
+import { HydratedDocument, Schema as MongooseSchema, Types } from 'mongoose';
+import { DeviceTelemetry } from '../types/device-telemetry.type';
 
 export type UserDeviceSessionDocument = HydratedDocument<UserDeviceSession>;
 
@@ -22,6 +23,12 @@ export class UserDeviceSession {
 
   @Prop({ type: Date, default: () => new Date() })
   lastActiveAt!: Date;
+
+  @Prop({ type: MongooseSchema.Types.Mixed, default: null })
+  telemetry?: DeviceTelemetry | null;
+
+  @Prop({ type: Date, default: null })
+  telemetryUpdatedAt?: Date | null;
 
   updatedAt?: Date;
   createdAt?: Date;
