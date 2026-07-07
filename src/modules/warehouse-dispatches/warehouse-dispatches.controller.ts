@@ -40,6 +40,7 @@ export class WarehouseDispatchesController {
     @Query('search') search: string | undefined,
     @Query('dateFrom') dateFrom: string | undefined,
     @Query('dateTo') dateTo: string | undefined,
+    @Query('visibleFrom') visibleFrom: string | undefined,
     @Query('source') source: string | undefined,
     @Query('scope') scope: string | undefined,
     @Query('structureId') structureId: string | undefined,
@@ -51,6 +52,7 @@ export class WarehouseDispatchesController {
     query.search = search?.trim() || undefined;
     query.dateFrom = dateFrom?.trim() || undefined;
     query.dateTo = dateTo?.trim() || undefined;
+    query.visibleFrom = visibleFrom?.trim() || undefined;
     query.source = source?.trim() || undefined;
     query.scope = scope?.trim() || undefined;
     query.structureId = structureId?.trim() || undefined;

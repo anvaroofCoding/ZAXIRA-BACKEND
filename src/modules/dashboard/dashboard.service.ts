@@ -31,6 +31,8 @@ import {
   DashboardCalendarEventType,
 } from './dashboard-calendar.types';
 import { WarehousePricingService } from '../warehouse/warehouse-pricing.service';
+import { TasksService } from '../tasks/tasks.service';
+import { AssignedTaskStatus } from '../tasks/enums/assigned-task-status.enum';
 
 type Scope = { structureId?: string | undefined };
 
@@ -47,6 +49,7 @@ export class DashboardService {
     private readonly purchaseRequestModel: Model<PurchaseRequestDocument>,
     private readonly usersService: UsersService,
     private readonly warehousePricingService: WarehousePricingService,
+    private readonly tasksService: TasksService,
   ) {}
 
   private async resolveViewerStructureIdOrFail(userId: string) {
@@ -765,6 +768,38 @@ export class DashboardService {
           .filter(Boolean)
           .join(' '),
         navigatePath: `/transfer/transferni-qabul-qilish?dispatch=${id}`,
+        overdue,
+      });
+    }
+
+    const myTasks = await this.tasksService.findMyTasksInRange(
+      userId,
+      from,
+      to,
+    );
+
+    for (const task of myTasks) {
+      const overdue =
+        task.status === AssignedTaskStatus.PENDING && Boolean(task.overdue);
+
+      const statusLabel =
+        task.status === AssignedTaskStatus.COMPLETED
+          ? 'Bajarildi'
+          : task.status === AssignedTaskStatus.CANCELLED
+            ? 'Bekor qilindi'
+            : overdue
+              ? 'Kechikkan'
+              : 'Kutilmoqda';
+
+      events.push({
+        id: `task-${task.id}`,
+        type: DashboardCalendarEventType.TASK_DEADLINE,
+        date: this.dayKey(task.dueDate),
+        dueDate: this.dayKey(task.dueDate),
+        title: task.title,
+        description: task.description?.trim() || undefined,
+        subtitle: statusLabel,
+        navigatePath: '/dashboard/kalendar',
         overdue,
       });
     }

@@ -11,6 +11,8 @@ export const GRANULAR_PERMISSION_PATHS = new Set<string>([
   '/royxatga-olish/foydalanuvchilar',
   '/royxatga-olish/tuzilmalar',
   '/royxatga-olish/komissiya-azolari',
+  '/royxatga-olish/birliklar',
+  '/royxatga-olish/vazifa-berish',
 ]);
 
 export const isGranularPermissionPath = (path: string): boolean =>

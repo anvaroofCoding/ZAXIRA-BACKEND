@@ -20,11 +20,13 @@ import {
 } from '../warehouse/schemas/warehouse-inventory.schema';
 import { DashboardController } from './dashboard.controller';
 import { DashboardService } from './dashboard.service';
+import { TasksModule } from '../tasks/tasks.module';
 
 @Module({
   imports: [
     UsersModule,
     WarehouseModule,
+    TasksModule,
     MongooseModule.forFeature([
       { name: WarehouseInventory.name, schema: WarehouseInventorySchema },
       { name: WarehouseDispatch.name, schema: WarehouseDispatchSchema },

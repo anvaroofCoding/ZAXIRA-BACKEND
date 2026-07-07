@@ -2,6 +2,7 @@ export enum DashboardCalendarEventType {
   PURCHASE_DEADLINE = 'PURCHASE_DEADLINE',
   PURCHASE_ARRIVAL = 'PURCHASE_ARRIVAL',
   TRANSFER_ARRIVAL = 'TRANSFER_ARRIVAL',
+  TASK_DEADLINE = 'TASK_DEADLINE',
 }
 
 export const DASHBOARD_CALENDAR_EVENT_LABELS: Record<
@@ -11,6 +12,7 @@ export const DASHBOARD_CALENDAR_EVENT_LABELS: Record<
   [DashboardCalendarEventType.PURCHASE_DEADLINE]: 'Ariza muddati',
   [DashboardCalendarEventType.PURCHASE_ARRIVAL]: 'Xarid tovarlari kelishi',
   [DashboardCalendarEventType.TRANSFER_ARRIVAL]: 'Transfer kelishi',
+  [DashboardCalendarEventType.TASK_DEADLINE]: 'Vazifa muddati',
 };
 
 export interface DashboardCalendarEvent {
@@ -19,6 +21,8 @@ export interface DashboardCalendarEvent {
   date: string;
   title: string;
   subtitle: string;
+  description?: string;
+  dueDate?: string;
   navigatePath: string;
   mandatory?: boolean;
   overdue?: boolean;

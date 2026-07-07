@@ -1396,6 +1396,27 @@ export class WarehouseDispatchesService {
       query.dateTo,
     );
 
+    if (query.visibleFrom?.trim()) {
+      const from = new Date(query.visibleFrom.trim());
+
+      if (!Number.isNaN(from.getTime())) {
+        from.setHours(0, 0, 0, 0);
+        clauses.push({
+          $or: [
+            {
+              status: {
+                $in: [
+                  WarehouseDispatchStatus.PENDING_RECEIPT,
+                  WarehouseDispatchStatus.PARTIALLY_RECEIVED,
+                ],
+              },
+            },
+            { plannedArrivalAt: { $gte: from } },
+          ],
+        });
+      }
+    }
+
     const term = query.search?.trim();
 
     if (term) {

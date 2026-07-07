@@ -19,6 +19,7 @@ import { CreateWarehouseExpenseDto } from './dto/create-warehouse-expense.dto';
 import { QueryWarehouseExpensesDto } from './dto/query-warehouse-expenses.dto';
 import { QueryWarehouseFixedAssetsDto } from './dto/query-warehouse-fixed-assets.dto';
 import { QueryWarehouseInventoryDto } from './dto/query-warehouse-inventory.dto';
+import { UpdateCrossWarehouseInventoryDto } from './dto/update-cross-warehouse-inventory.dto';
 import { UpdateWarehouseInventoryNomenclatureDto } from './dto/update-warehouse-inventory-nomenclature.dto';
 import { DiscardWarehouseFixedAssetDto } from './dto/discard-warehouse-fixed-asset.dto';
 import { QueryWarehouseImportsDto } from './dto/query-warehouse-imports.dto';
@@ -100,11 +101,30 @@ export class WarehouseController {
     @Param('id', ParseMongoIdPipe) id: string,
     @Query() query: QueryWarehouseInventoryDto,
     @Query('structureId') structureId: string | undefined,
+    @CurrentUser() user: JwtPayload,
   ) {
     return this.warehouseService.listInventoryByAnyLocation(
       id,
       structureId,
       query,
+      user.sub,
+      user.role,
+    );
+  }
+
+  @Patch('all/locations/:locationId/inventory/:inventoryId')
+  updateCrossWarehouseInventory(
+    @Param('locationId', ParseMongoIdPipe) locationId: string,
+    @Param('inventoryId', ParseMongoIdPipe) inventoryId: string,
+    @Body() dto: UpdateCrossWarehouseInventoryDto,
+    @CurrentUser() user: JwtPayload,
+  ) {
+    return this.warehouseService.updateCrossWarehouseInventory(
+      locationId,
+      inventoryId,
+      dto,
+      user.sub,
+      user.role,
     );
   }
 

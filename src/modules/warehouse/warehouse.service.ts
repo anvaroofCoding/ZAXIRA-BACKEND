@@ -32,6 +32,7 @@ import { appendDateRangeClause } from '../../common/utils/date-range-filter.util
 import { QueryWarehouseExpensesDto } from './dto/query-warehouse-expenses.dto';
 import { QueryWarehouseFixedAssetsDto } from './dto/query-warehouse-fixed-assets.dto';
 import { QueryWarehouseInventoryDto } from './dto/query-warehouse-inventory.dto';
+import { UpdateCrossWarehouseInventoryDto } from './dto/update-cross-warehouse-inventory.dto';
 import {
   isFixedAssetReasonKey,
   isWarehouseExpenseReasonKey,
@@ -277,6 +278,12 @@ export class WarehouseService {
 
   private isPrivilegedRole(role?: UserRole) {
     return role === UserRole.SUPER_ADMIN || role === UserRole.ADMIN;
+  }
+
+  private assertPrivilegedRole(role?: UserRole, message = 'Bu amal uchun admin huquqi kerak') {
+    if (!this.isPrivilegedRole(role)) {
+      throw new ForbiddenException(message);
+    }
   }
 
   private async assertCanViewExpenseHistory(userId: string, role?: UserRole) {
@@ -797,6 +804,202 @@ export class WarehouseService {
       name: inventory.name,
       characteristics: inventory.characteristics,
       barcode,
+      nomenclatureCode: mapNomenclatureCode(inventory.receiptNomenclatureCode),
+      quantity: inventory.quantity ?? 0,
+    };
+  }
+
+  async updateCrossWarehouseInventory(
+    locationId: string,
+    inventoryId: string,
+    dto: UpdateCrossWarehouseInventoryDto,
+    userId: string,
+    role?: UserRole,
+  ) {
+    this.assertPrivilegedRole(role, 'Boshqa ombor tovarini tahrirlashga ruxsat yo‘q');
+
+    const structureId = dto.structureId?.trim();
+    if (!structureId || !Types.ObjectId.isValid(structureId)) {
+      throw new BadRequestException('Tuzilma ID noto‘g‘ri');
+    }
+
+    const hasEditableField =
+      dto.name !== undefined ||
+      dto.characteristics !== undefined ||
+      dto.nomenclatureCode !== undefined ||
+      dto.barcode !== undefined ||
+      dto.quantity !== undefined;
+
+    if (!hasEditableField) {
+      throw new BadRequestException('Kamida bitta maydonni o‘zgartiring');
+    }
+
+    const viewer = await this.usersService.findById(userId);
+    const viewerStructureId = viewer?.structureId
+      ? String(viewer.structureId)
+      : null;
+
+    if (viewerStructureId && viewerStructureId === structureId) {
+      throw new BadRequestException(
+        'O‘z omboringizdagi tovarlarni «Mening omborim» sahifasida tahrirlang',
+      );
+    }
+
+    await this.assertStructureHasWarehouse(structureId);
+
+    const location = await this.locationModel
+      .findOne({
+        _id: new Types.ObjectId(locationId),
+        structureId: new Types.ObjectId(structureId),
+        isActive: true,
+      })
+      .select('_id')
+      .exec();
+
+    if (!location) {
+      throw new NotFoundException('Ombor joyi topilmadi');
+    }
+
+    const inventory = await this.inventoryModel
+      .findOne({
+        _id: new Types.ObjectId(inventoryId),
+        structureId: new Types.ObjectId(structureId),
+        locationId: new Types.ObjectId(locationId),
+      })
+      .exec();
+
+    if (!inventory) {
+      throw new NotFoundException('Tovar topilmadi');
+    }
+
+    const nextName =
+      dto.name !== undefined ? dto.name.trim() : inventory.name.trim();
+    const nextCharacteristics =
+      dto.characteristics !== undefined
+        ? dto.characteristics.trim()
+        : inventory.characteristics.trim();
+
+    if (!nextName) {
+      throw new BadRequestException('Tovar nomini kiriting');
+    }
+
+    if (!nextCharacteristics) {
+      throw new BadRequestException('Tovar xususiyatini kiriting');
+    }
+
+    const nextNomenclature =
+      dto.nomenclatureCode !== undefined
+        ? normalizeNomenclatureCode(dto.nomenclatureCode)
+        : normalizeNomenclatureCode(inventory.receiptNomenclatureCode ?? '');
+
+    const nextQuantity =
+      dto.quantity !== undefined ? dto.quantity : (inventory.quantity ?? 0);
+
+    if (nextQuantity < 0) {
+      throw new BadRequestException('Tovar soni manfiy bo‘lmasligi kerak');
+    }
+
+    let nextBarcode: string;
+    if (dto.barcode !== undefined) {
+      const trimmedBarcode = dto.barcode.trim();
+      nextBarcode = trimmedBarcode
+        ? trimmedBarcode
+        : computeWarehouseBarcode(nextName, nextCharacteristics);
+    } else {
+      nextBarcode = resolveInventoryBarcode(
+        nextName,
+        nextCharacteristics,
+        inventory.barcode,
+        nextNomenclature || undefined,
+      );
+    }
+
+    const nextItemKey = buildInventoryItemKey(
+      nextName,
+      nextCharacteristics,
+      nextNomenclature || undefined,
+    );
+
+    const structureObjectId = new Types.ObjectId(structureId);
+    const locationObjectId = new Types.ObjectId(locationId);
+    const inventoryObjectId = new Types.ObjectId(inventoryId);
+
+    const duplicateItemKey = await this.inventoryModel
+      .findOne({
+        structureId: structureObjectId,
+        locationId: locationObjectId,
+        itemKey: nextItemKey,
+        _id: { $ne: inventoryObjectId },
+      })
+      .select('name')
+      .lean()
+      .exec();
+
+    if (duplicateItemKey) {
+      throw new BadRequestException(
+        `Bu joyda «${duplicateItemKey.name}» nomli shu xil tovar allaqachon mavjud`,
+      );
+    }
+
+    if (nextNomenclature) {
+      const duplicateNomenclature = await this.inventoryModel
+        .findOne({
+          structureId: structureObjectId,
+          locationId: locationObjectId,
+          receiptNomenclatureCode: nextNomenclature,
+          _id: { $ne: inventoryObjectId },
+        })
+        .select('name')
+        .lean()
+        .exec();
+
+      if (
+        duplicateNomenclature &&
+        !inventoryNamesMatch(duplicateNomenclature.name, nextName)
+      ) {
+        throw new BadRequestException(
+          `«${nextNomenclature}» nomeklatura raqami allaqachon «${duplicateNomenclature.name}» tovariga biriktirilgan. Boshqa nom bilan ishlatib bo‘lmaydi.`,
+        );
+      }
+    }
+
+    if (nextBarcode) {
+      const duplicateBarcode = await this.inventoryModel
+        .findOne({
+          locationId: locationObjectId,
+          barcode: nextBarcode,
+          _id: { $ne: inventoryObjectId },
+        })
+        .select('name')
+        .lean()
+        .exec();
+
+      if (duplicateBarcode) {
+        throw new BadRequestException(
+          `«${nextBarcode}» barcode allaqachon «${duplicateBarcode.name}» tovarida mavjud`,
+        );
+      }
+    }
+
+    inventory.name = nextName;
+    inventory.characteristics = nextCharacteristics;
+    inventory.quantity = nextQuantity;
+    inventory.itemKey = nextItemKey;
+    inventory.barcode = nextBarcode;
+
+    if (nextNomenclature) {
+      inventory.receiptNomenclatureCode = nextNomenclature;
+    } else {
+      inventory.receiptNomenclatureCode = undefined;
+    }
+
+    await inventory.save();
+
+    return {
+      id: inventory.id,
+      name: inventory.name,
+      characteristics: inventory.characteristics,
+      barcode: nextBarcode,
       nomenclatureCode: mapNomenclatureCode(inventory.receiptNomenclatureCode),
       quantity: inventory.quantity ?? 0,
     };
@@ -1373,7 +1576,11 @@ export class WarehouseService {
     locationId: string,
     structureIdRaw: string | undefined,
     query: QueryWarehouseInventoryDto,
+    userId: string,
+    role?: UserRole,
   ) {
+    await this.assertCanViewAllWarehousesOverview(userId, role);
+
     const structureId = structureIdRaw?.trim();
     if (!structureId || !Types.ObjectId.isValid(structureId)) {
       throw new BadRequestException('Tuzilma ID noto‘g‘ri');

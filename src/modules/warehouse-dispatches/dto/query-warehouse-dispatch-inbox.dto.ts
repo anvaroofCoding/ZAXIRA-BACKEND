@@ -38,6 +38,12 @@ export class QueryWarehouseDispatchInboxDto {
   @Matches(DATE_ONLY_PATTERN)
   dateTo?: string;
 
+  /** Faol transferlar yoki rejalashtirilgan kelish sanasi shu kundan keyin bo‘lganlar */
+  @IsOptional()
+  @IsString()
+  @Matches(DATE_ONLY_PATTERN)
+  visibleFrom?: string;
+
   @IsOptional()
   @IsString()
   source?: string;

@@ -56,7 +56,11 @@ export class UsersService {
     action: UsersActionKey,
     message = 'Sahifa amali uchun ruxsat yo‘q',
   ) {
-    if (!requesterId || isSuperAdminRole(requesterRole)) {
+    if (
+      !requesterId ||
+      isSuperAdminRole(requesterRole) ||
+      requesterRole === UserRole.ADMIN
+    ) {
       return;
     }
 
@@ -436,13 +440,45 @@ export class UsersService {
         select: 'fullName shortName hasWarehouse',
       })
       .sort({ displayName: 1, login: 1 })
-      .select('displayName login structureId')
+      .select('displayName login structureId position')
       .exec();
 
     return users.map((user) => ({
       id: user.id,
       displayName: user.displayName || user.login,
       login: user.login,
+      structureShortName:
+        typeof user.structureId === 'object' &&
+        user.structureId !== null &&
+        'shortName' in user.structureId
+          ? ((user.structureId as any).shortName as string)
+          : null,
+    }));
+  }
+
+  async findActiveUsersByStructureId(structureId: string) {
+    if (!Types.ObjectId.isValid(structureId)) {
+      return [];
+    }
+
+    const users = await this.userModel
+      .find({
+        isActive: true,
+        structureId: new Types.ObjectId(structureId),
+      })
+      .populate({
+        path: 'structureId',
+        select: 'shortName',
+      })
+      .sort({ displayName: 1, login: 1 })
+      .select('displayName login position structureId')
+      .exec();
+
+    return users.map((user) => ({
+      id: user.id,
+      displayName: user.displayName || user.login,
+      login: user.login,
+      position: user.position ?? '',
       structureShortName:
         typeof user.structureId === 'object' &&
         user.structureId !== null &&

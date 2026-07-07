@@ -38,6 +38,8 @@ export const PERMISSION_CATALOG = {
           path: '/royxatga-olish/komissiya-azolari',
           label: "Komissiya a'zolari",
         },
+        { path: '/royxatga-olish/birliklar', label: 'Birliklar' },
+        { path: '/royxatga-olish/vazifa-berish', label: 'Vazifa berish' },
       ],
     },
     {

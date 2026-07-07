@@ -37,6 +37,8 @@ import { ProductPricesModule } from './modules/product-prices/product-prices.mod
 import { ProductsModule } from './modules/products/products.module';
 import { NotificationsModule } from './modules/notifications/notifications.module';
 import { CommissionsModule } from './modules/commissions/commissions.module';
+import { MeasurementUnitsModule } from './modules/measurement-units/measurement-units.module';
+import { TasksModule } from './modules/tasks/tasks.module';
 
 @Module({
   imports: [
@@ -80,6 +82,8 @@ import { CommissionsModule } from './modules/commissions/commissions.module';
     MediaModule,
     NotificationsModule,
     CommissionsModule,
+    MeasurementUnitsModule,
+    TasksModule,
   ],
   providers: [
     {
