@@ -440,6 +440,7 @@ export class PurchaseRequestsController {
       kelishuv?: Express.Multer.File[];
     },
     @Body('payload') payload: string | undefined,
+    @Body('manualDocuments') manualDocuments: string | undefined,
     @CurrentUser() user: JwtPayload,
   ) {
     return this.purchaseRequestsService.submitActiveSession(
@@ -450,6 +451,7 @@ export class PurchaseRequestsController {
         kelishuv: files?.kelishuv?.[0],
       },
       payload,
+      { manualDocuments },
     );
   }
 
