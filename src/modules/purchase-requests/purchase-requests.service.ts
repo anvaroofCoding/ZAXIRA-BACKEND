@@ -103,6 +103,10 @@ import {
   validatePurchasePeriod,
 } from './utils/purchase-period.util';
 import { PurchasePeriodType } from './enums/purchase-period-type.enum';
+import {
+  parseOptionalBooleanFlag,
+  resolveSessionDocumentSource,
+} from './utils/session-documents-mode.util';
 
 const PURCHASE_REQUEST_DELETE_WINDOW_MS = 24 * 60 * 60 * 1000;
 const MAX_ACTIVE_SESSIONS_PER_USER = 10;
@@ -1056,6 +1060,8 @@ export class PurchaseRequestsService implements OnModuleInit {
         ? String(session.editingRequestId)
         : null,
       reservedRequestCode: session.reservedRequestCode ?? null,
+      manualDocuments: Boolean(session.manualDocuments),
+      documentsPreparedAt: session.documentsPreparedAt ?? null,
       createdAt: session.createdAt ?? null,
       updatedAt: session.updatedAt ?? null,
     };
@@ -3631,6 +3637,10 @@ export class PurchaseRequestsService implements OnModuleInit {
       requestId,
       file.storedName,
     );
+    await this.sessionDocumentsService.assertRequestDocumentExists(
+      requestId,
+      file.storedName,
+    );
 
     return { file, filePath };
   }
@@ -3686,6 +3696,10 @@ export class PurchaseRequestsService implements OnModuleInit {
     }
 
     const filePath = this.purchaseRequestFilesService.resolveStoredPath(
+      requestId,
+      file.storedName,
+    );
+    await this.purchaseRequestFilesService.assertStoredFileExists(
       requestId,
       file.storedName,
     );
@@ -5432,25 +5446,36 @@ export class PurchaseRequestsService implements OnModuleInit {
             manufacturingCountry: String(item.manufacturingCountry ?? '').trim(),
           };
         })
-      : [];
+      : undefined;
 
     const commissionMemberIds = Array.isArray(body.commissionMemberIds)
       ? body.commissionMemberIds.filter(isMongoId).map(String)
-      : [];
+      : undefined;
 
     const dto: SavePurchaseRequestSessionDto = {
       title: typeof body.title === 'string' ? body.title.trim() : undefined,
-      commissionMemberIds,
-      items,
-      comment: typeof body.comment === 'string' ? body.comment : '',
+      comment: typeof body.comment === 'string' ? body.comment : undefined,
       commissionAgreementText:
         typeof body.commissionAgreementText === 'string'
           ? body.commissionAgreementText
-          : '',
+          : undefined,
     };
+
+    if (items !== undefined) {
+      dto.items = items;
+    }
+
+    if (commissionMemberIds !== undefined) {
+      dto.commissionMemberIds = commissionMemberIds;
+    }
 
     if (isMongoId(body.bossId)) {
       dto.bossId = String(body.bossId);
+    }
+
+    const manualDocuments = parseOptionalBooleanFlag(body.manualDocuments);
+    if (manualDocuments !== undefined) {
+      dto.manualDocuments = manualDocuments;
     }
 
     const purchasePeriodType = parsePurchasePeriodType(body.purchasePeriodType);
@@ -5583,28 +5608,51 @@ export class PurchaseRequestsService implements OnModuleInit {
   ) {
     const session = await this.findActiveSessionOrFail(userId, sessionId);
 
-    const items = (dto.items ?? []).map((item) => ({
-      name: item.name?.trim() ?? '',
-      characteristics: item.characteristics?.trim() ?? '',
-      quantity:
-        item.quantity && Number.isFinite(item.quantity) && item.quantity >= 1
-          ? item.quantity
-          : 1,
-      unit: item.unit?.trim() ?? '',
-      manufacturingCountry: item.manufacturingCountry?.trim() ?? '',
-    }));
+    const items =
+      dto.items === undefined
+        ? undefined
+        : dto.items.map((item) => ({
+            name: item.name?.trim() ?? '',
+            characteristics: item.characteristics?.trim() ?? '',
+            quantity:
+              item.quantity && Number.isFinite(item.quantity) && item.quantity >= 1
+                ? item.quantity
+                : 1,
+            unit: item.unit?.trim() ?? '',
+            manufacturingCountry: item.manufacturingCountry?.trim() ?? '',
+          }));
 
-    session.commissionMemberIds = (dto.commissionMemberIds ?? []).map(
-      (id) => new Types.ObjectId(id),
-    );
-    session.bossId = dto.bossId ? new Types.ObjectId(dto.bossId) : undefined;
-    session.items = items;
-    session.comment = dto.comment?.trim() ?? '';
-    session.commissionAgreementText = dto.commissionAgreementText?.trim() ?? '';
+    if (dto.commissionMemberIds !== undefined) {
+      session.commissionMemberIds = dto.commissionMemberIds.map(
+        (id) => new Types.ObjectId(id),
+      );
+      session.markModified('commissionMemberIds');
+    }
+
+    if (dto.bossId !== undefined) {
+      session.bossId = dto.bossId ? new Types.ObjectId(dto.bossId) : undefined;
+    }
+
+    if (items !== undefined) {
+      session.items = items;
+      session.markModified('items');
+    }
+
+    if (dto.comment !== undefined) {
+      session.comment = dto.comment.trim();
+    }
+
+    if (dto.commissionAgreementText !== undefined) {
+      session.commissionAgreementText = dto.commissionAgreementText.trim();
+    }
+
+    if (dto.manualDocuments !== undefined) {
+      session.manualDocuments = dto.manualDocuments;
+    }
 
     if (dto.title?.trim()) {
       session.title = dto.title.trim();
-    } else {
+    } else if (items !== undefined) {
       const autoTitle = items.find((item) => item.name)?.name;
       if (autoTitle) {
         session.title = autoTitle;
@@ -5636,8 +5684,6 @@ export class PurchaseRequestsService implements OnModuleInit {
       session.purchasePeriodMonth = undefined;
     }
 
-    session.markModified('items');
-    session.markModified('commissionMemberIds');
     await session.save();
 
     return this.toSessionPublic(session);
@@ -5685,10 +5731,26 @@ export class PurchaseRequestsService implements OnModuleInit {
 
     await this.bumpSessionDocumentVersion(sessionId, docType);
 
+    const session = await this.findActiveSessionOrFail(userId, sessionId);
+    const bildirgiReady = await this.sessionDocumentsService.getDocumentUpdatedAt(
+      sessionId,
+      'bildirgi',
+    );
+    const kelishuvReady = await this.sessionDocumentsService.getDocumentUpdatedAt(
+      sessionId,
+      'kelishuv',
+    );
+
+    if (bildirgiReady && kelishuvReady) {
+      session.documentsPreparedAt = new Date();
+      await session.save();
+    }
+
     return {
       docType,
       size: file.buffer.length,
       uploaded: true,
+      documentsPreparedAt: session.documentsPreparedAt ?? null,
     };
   }
 
@@ -5701,7 +5763,8 @@ export class PurchaseRequestsService implements OnModuleInit {
         dto.items?.length ||
         dto.comment?.trim() ||
         dto.commissionAgreementText?.trim() ||
-        dto.purchasePeriodType,
+        dto.purchasePeriodType ||
+        dto.manualDocuments !== undefined,
     );
   }
 
@@ -5716,6 +5779,18 @@ export class PurchaseRequestsService implements OnModuleInit {
     }
 
     const session = await this.findActiveSessionOrFail(userId, sessionId);
+
+    if (session.manualDocuments) {
+      return {
+        sessionId,
+        requestCode: session.reservedRequestCode ?? null,
+        documentToken: session.documentToken ?? null,
+        documentsPreparedAt: session.documentsPreparedAt ?? null,
+        documentVersions: session.documentVersions ?? {},
+        manualDocuments: true,
+        generated: false,
+      };
+    }
 
     if (!session.commissionMemberIds?.length || !session.bossId) {
       throw new BadRequestException(
@@ -5766,6 +5841,8 @@ export class PurchaseRequestsService implements OnModuleInit {
       documentToken: session.documentToken,
       documentsPreparedAt: session.documentsPreparedAt,
       documentVersions: session.documentVersions,
+      manualDocuments: false,
+      generated: true,
     };
   }
 
@@ -5873,22 +5950,40 @@ export class PurchaseRequestsService implements OnModuleInit {
 
   private async resolveSessionSubmitDocuments(
     sessionId: string,
-    files?: {
+    files: {
       bildirgi?: Express.Multer.File;
       kelishuv?: Express.Multer.File;
-    },
+    } | undefined,
+    manualDocuments: boolean,
   ) {
-    if (files?.bildirgi?.buffer?.length && files?.kelishuv?.buffer?.length) {
-      this.assertSubmittedDocxUpload(files.bildirgi);
-      this.assertSubmittedDocxUpload(files.kelishuv);
+    const hasBildirgiUpload = Boolean(files?.bildirgi?.buffer?.length);
+    const hasKelishuvUpload = Boolean(files?.kelishuv?.buffer?.length);
+    const sessionDocsReady = await this.sessionDocumentsService
+      .getDocumentUpdatedAt(sessionId, 'bildirgi')
+      .then(async (bildirgi) => {
+        const kelishuv = await this.sessionDocumentsService.getDocumentUpdatedAt(
+          sessionId,
+          'kelishuv',
+        );
+        return Boolean(bildirgi && kelishuv);
+      });
+
+    const source = resolveSessionDocumentSource({
+      manualDocuments,
+      hasBildirgiUpload,
+      hasKelishuvUpload,
+      sessionDocsReady,
+    });
+
+    if (source === 'uploads') {
+      this.assertSubmittedDocxUpload(files?.bildirgi);
+      this.assertSubmittedDocxUpload(files?.kelishuv);
 
       return {
-        bildirgi: files.bildirgi.buffer,
-        kelishuv: files.kelishuv.buffer,
+        bildirgi: files!.bildirgi!.buffer,
+        kelishuv: files!.kelishuv!.buffer,
       };
     }
-
-    await this.sessionDocumentsService.assertDocumentsReady(sessionId);
 
     return {
       bildirgi: await this.sessionDocumentsService.readDocument(
@@ -5902,6 +5997,24 @@ export class PurchaseRequestsService implements OnModuleInit {
     };
   }
 
+  private resolveSubmitManualDocumentsFlag(
+    session: { manualDocuments?: boolean },
+    parsedPayload?: Record<string, unknown>,
+    formFlag?: string,
+  ) {
+    const fromForm = parseOptionalBooleanFlag(formFlag);
+    if (fromForm !== undefined) {
+      return fromForm;
+    }
+
+    const fromPayload = parseOptionalBooleanFlag(parsedPayload?.manualDocuments);
+    if (fromPayload !== undefined) {
+      return fromPayload;
+    }
+
+    return Boolean(session.manualDocuments);
+  }
+
   async submitActiveSession(
     userId: string,
     sessionId: string,
@@ -5910,16 +6023,36 @@ export class PurchaseRequestsService implements OnModuleInit {
       kelishuv?: Express.Multer.File;
     },
     sessionPayloadJson?: string,
+    formFlags?: { manualDocuments?: string },
   ) {
     await this.findActiveSessionOrFail(userId, sessionId);
 
+    let parsedPayload: Record<string, unknown> | undefined;
+
     if (sessionPayloadJson?.trim()) {
       try {
-        const parsed = JSON.parse(sessionPayloadJson) as Record<string, unknown>;
+        parsedPayload = JSON.parse(sessionPayloadJson) as Record<string, unknown>;
+      } catch {
+        throw new BadRequestException('Ariza ma’lumotlari noto‘g‘ri formatda yuborildi');
+      }
+    }
+
+    const formManualDocuments = parseOptionalBooleanFlag(
+      formFlags?.manualDocuments,
+    );
+    if (formManualDocuments !== undefined) {
+      parsedPayload = {
+        ...(parsedPayload ?? {}),
+        manualDocuments: formManualDocuments,
+      };
+    }
+
+    if (parsedPayload) {
+      try {
         await this.saveActiveSession(
           userId,
           sessionId,
-          this.normalizeSessionPayload(parsed),
+          this.normalizeSessionPayload(parsedPayload),
         );
       } catch (error) {
         if (error instanceof BadRequestException) {
@@ -6016,15 +6149,22 @@ export class PurchaseRequestsService implements OnModuleInit {
 
     validatePurchasePeriod(createDto);
 
-    if (!files?.bildirgi?.buffer?.length || !files?.kelishuv?.buffer?.length) {
-      throw new BadRequestException(
-        'Bildirgi va kelishuv Word fayllari yuborilishi shart',
-      );
+    const manualDocuments = this.resolveSubmitManualDocumentsFlag(
+      session,
+      parsedPayload,
+      formFlags?.manualDocuments,
+    );
+
+    if (!session.applicantVerificationToken) {
+      session.applicantVerificationToken =
+        this.sessionDocumentsService.createApplicantVerificationToken();
+      await session.save();
     }
 
     const documentBuffers = await this.resolveSessionSubmitDocuments(
       sessionId,
       files,
+      manualDocuments,
     );
 
     const reservedRequestCode = await this.ensureSessionRequestCode(

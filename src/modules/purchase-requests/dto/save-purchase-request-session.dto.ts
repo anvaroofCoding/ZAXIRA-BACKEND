@@ -1,6 +1,7 @@
 import { Transform, Type } from 'class-transformer';
 import {
   IsArray,
+  IsBoolean,
   IsEnum,
   IsInt,
   IsMongoId,
@@ -52,7 +53,7 @@ export class SavePurchaseRequestSessionDto {
   @Transform(({ value }) =>
     Array.isArray(value)
       ? value.filter((id) => typeof id === 'string' && Types.ObjectId.isValid(id))
-      : [],
+      : undefined,
   )
   @IsMongoId({ each: true })
   commissionMemberIds?: string[];
@@ -66,7 +67,7 @@ export class SavePurchaseRequestSessionDto {
 
   @IsOptional()
   @IsArray()
-  @Transform(({ value }) => (Array.isArray(value) ? value : []))
+  @Transform(({ value }) => (Array.isArray(value) ? value : undefined))
   @ValidateNested({ each: true })
   @Type(() => SavePurchaseRequestSessionItemDto)
   items?: SavePurchaseRequestSessionItemDto[];
@@ -78,6 +79,19 @@ export class SavePurchaseRequestSessionDto {
   @IsOptional()
   @IsString()
   commissionAgreementText?: string;
+
+  @IsOptional()
+  @Transform(({ value }) => {
+    if (value === true || value === 'true' || value === '1' || value === 1) {
+      return true;
+    }
+    if (value === false || value === 'false' || value === '0' || value === 0) {
+      return false;
+    }
+    return undefined;
+  })
+  @IsBoolean()
+  manualDocuments?: boolean;
 
   @IsOptional()
   @IsEnum(PurchasePeriodType)

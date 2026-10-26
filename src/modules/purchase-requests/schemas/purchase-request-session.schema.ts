@@ -68,6 +68,13 @@ export class PurchaseRequestSession {
   @Prop()
   documentsPreparedAt?: Date;
 
+  /**
+   * true = client uploads bildirgi+kelishuv instead of auto-generating.
+   * Absent/false keeps the current auto-generate path.
+   */
+  @Prop({ type: Boolean })
+  manualDocuments?: boolean;
+
   @Prop({ type: Object, default: {} })
   documentVersions?: Partial<Record<'bildirgi' | 'kelishuv', number>>;
 

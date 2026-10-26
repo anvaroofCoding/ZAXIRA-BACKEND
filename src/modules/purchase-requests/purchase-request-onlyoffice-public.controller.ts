@@ -46,6 +46,10 @@ export class PurchaseRequestOnlyOfficePublicController {
     );
 
     const normalizedType = this.normalizeDocType(docType);
+    await this.sessionDocumentsService.assertDocumentExists(
+      sessionId,
+      normalizedType,
+    );
     const filePath = this.sessionDocumentsService.resolveDocumentPath(
       sessionId,
       normalizedType,

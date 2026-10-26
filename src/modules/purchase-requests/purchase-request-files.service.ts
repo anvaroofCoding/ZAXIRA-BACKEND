@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { randomUUID } from 'crypto';
 import { mkdir, rm, writeFile } from 'fs/promises';
 import * as path from 'path';
+import { assertReadableFile } from '../../common/utils/assert-readable-file.util';
 import { PurchaseFileEmbeddable } from './schemas/purchase-details.schema';
 
 @Injectable()
@@ -20,6 +21,13 @@ export class PurchaseRequestFilesService {
   resolveStoredPath(requestId: string, storedName: string) {
     const safeName = path.basename(storedName);
     return path.join(this.getRequestDir(requestId), safeName);
+  }
+
+  async assertStoredFileExists(requestId: string, storedName: string) {
+    await assertReadableFile(
+      this.resolveStoredPath(requestId, storedName),
+      'Fayl topilmadi',
+    );
   }
 
   async saveUploadedFiles(

@@ -8,6 +8,7 @@ import { randomBytes } from 'node:crypto';
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import { Types } from 'mongoose';
+import { assertReadableFile } from '../../common/utils/assert-readable-file.util';
 import { buildPurchaseRequestVerifyPublicUrl } from '../../common/utils/public-url.util';
 import { UsersService } from '../users/users.service';
 import { PurchaseRequestCommissionDocumentService } from './purchase-request-commission-document.service';
@@ -251,6 +252,20 @@ export class PurchaseRequestSessionDocumentsService {
     } catch {
       throw new NotFoundException('Hujjat topilmadi — avval tayyorlang');
     }
+  }
+
+  async assertDocumentExists(sessionId: string, docType: SessionDocumentType) {
+    await assertReadableFile(
+      this.resolveDocumentPath(sessionId, docType),
+      'Hujjat topilmadi — avval tayyorlang',
+    );
+  }
+
+  async assertRequestDocumentExists(requestId: string, storedName: string) {
+    await assertReadableFile(
+      this.resolveRequestDocumentPath(requestId, storedName),
+      'Tahrirlangan hujjat topilmadi',
+    );
   }
 
   async saveDocument(
